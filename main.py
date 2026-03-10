@@ -9,7 +9,9 @@ import os
 import logging
 import re
 import asyncio
-import sqlite3  # <-- IMPORT ADDED (required for load_jobs_from_db_into_scheduler)
+import sqlite3
+import sys
+import traceback
 from datetime import datetime, timedelta
 from typing import Optional
 from uuid import uuid4
@@ -30,13 +32,20 @@ from aiohttp import web
 # Import all database functions
 from database import *
 
+# ================== GLOBAL EXCEPTION HANDLER ==================
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    traceback.print_exception(exc_type, exc_value, exc_traceback, file=sys.stderr)
+
+sys.excepthook = global_exception_handler
+
 # ================== CONFIG ==================
 TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN environment variable not set!")
 
-# Owner ID – set your Telegram user ID here or via environment variable
-OWNER_ID = int(os.environ.get("OWNER_ID", "8104850843"))
+# Owner ID – fixed as per user
+OWNER_ID = 8104850843
 
 # Scheduler setup
 jobstores = {'default': MemoryJobStore()}
@@ -58,6 +67,15 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ================== DELETE WEBHOOK AT STARTUP ==================
+async def delete_webhook():
+    """Delete any existing webhook to allow polling."""
+    try:
+        # We'll call this after creating bot_app, but before polling
+        pass  # will be called in main
+    except Exception as e:
+        logger.error(f"Failed to delete webhook: {e}")
 
 # ================== TIME PARSING ==================
 def parse_time_to_seconds(time_str: str, allow_zero: bool = False) -> Optional[int]:
@@ -240,6 +258,11 @@ async def auto_backup_job():
         logger.info("Auto backup completed")
     except Exception as e:
         logger.error(f"Auto backup failed: {e}")
+
+# ================== TEST COMMAND ==================
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple test command to check if bot is alive."""
+    await update.message.reply_text("✅ Bot is working! Test successful.")
 
 # ================== CONVERSATION: /setrepeat ==================
 async def setrepeat_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1521,6 +1544,17 @@ def main():
     # Create bot application
     bot_app = Application.builder().token(TOKEN).build()
 
+    # Delete any existing webhook to allow polling
+    async def delete_webhook():
+        try:
+            await bot_app.bot.delete_webhook()
+            logger.info("✅ Existing webhook deleted (if any)")
+        except Exception as e:
+            logger.error(f"Failed to delete webhook: {e}")
+
+    # Run webhook deletion before starting polling
+    loop.run_until_complete(delete_webhook())
+
     # Conversation handler for /setrepeat
     setrepeat_conv = ConversationHandler(
         entry_points=[CommandHandler('setrepeat', setrepeat_start)],
@@ -1555,6 +1589,7 @@ def main():
     bot_app.add_handler(CommandHandler('myjobs', my_jobs))
     bot_app.add_handler(CommandHandler('stats', stats))
     bot_app.add_handler(CommandHandler('cancel', cancel))
+    bot_app.add_handler(CommandHandler('test', test_command))  # test command
 
     # Owner commands
     bot_app.add_handler(CommandHandler('backup', backup_command))
@@ -1588,7 +1623,7 @@ def main():
     scheduler.add_job(auto_backup_job, 'cron', hour=0, minute=0, id='auto_backup', replace_existing=True)
 
     # Start bot
-    logger.info("Bot started successfully!")
+    logger.info("Bot started successfully! Starting polling...")
     loop.run_until_complete(bot_app.run_polling())
 
 if __name__ == "__main__":
