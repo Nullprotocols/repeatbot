@@ -698,6 +698,15 @@ def get_all_ghost_groups() -> List[Dict]:
     conn.close()
     return [{'group_id': row[0], 'forward_to': row[1]} for row in rows]
 
+# ================== GHOST DESTINATION LOOKUP ==================
+def get_ghost_destination(group_id: int) -> Optional[int]:
+    """Return the forward_to ID for a ghost-enabled group."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT forward_to FROM ghost_forward WHERE group_id = ?', (group_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 # ================== RULE FUNCTIONS (AUTO-REPLY) ==================
 def add_rule(group_id: int, trigger_type: str, trigger_pattern: str, is_regex: bool,
