@@ -1,8 +1,8 @@
 # main.py
 # Telegram Repeat Bot – Ultimate Edition
-# Includes: Repeat Jobs, Premium, Blacklist, Ghost Mode, Sudo, Moderation,
-#           Welcome/Goodbye (with media), Auto-Reply Rules, Help, Banned Words,
-#           and all commands are now conversation-based.
+# Includes all features: repeat jobs, premium, blacklist, ghost mode, sudo, moderation,
+# welcome/goodbye (with media), auto-reply rules (with media reply), banned words,
+# remote group configuration, and conversation-based commands.
 # Fully compatible with Render Web Service (includes dummy HTTP server)
 # Python 3.12.3
 
@@ -185,9 +185,6 @@ async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Store group_id in user_data and proceed to original state
     context.user_data['target_group_id'] = group_id
     next_state = context.user_data.pop('next_state_after_group')
-    # Now we need to call the appropriate function based on next_state
-    # This is a bit tricky; we'll use a mapping or we can set a flag and then in the next step we use the stored group_id.
-    # For simplicity, we'll just return the next_state and the handler for that state will use the stored group_id.
     return next_state
 
 # ================== SEND MEDIA FUNCTIONS ==================
