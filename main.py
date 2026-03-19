@@ -2,7 +2,7 @@
 # Telegram Repeat Bot – Ultimate Edition (Fully Bug-Fixed)
 # Includes all features: repeat jobs, premium, blacklist, ghost mode, sudo, moderation,
 # welcome/goodbye (with media), auto-reply rules (with media reply), banned words,
-# remote group configuration, and conversation-based commands.
+# remote group configuration for ALL group admin commands, and conversation-based commands.
 # Fully compatible with Render Web Service (includes dummy HTTP server)
 # Python 3.12.3
 
@@ -70,8 +70,11 @@ BAN_USER, BAN_REASON = range(214, 216)
 UNBAN_USER = 217
 BLACKLIST_ACTION, BLACKLIST_ID, BLACKLIST_REASON = range(218, 221)
 
-# Additional state for remote group selection
+# Additional states for remote group and sudo
 ASK_GROUP_ID = 300
+GHOST_ENABLE_GROUP = 301
+GHOST_DISABLE_GROUP = 302
+SUDO_GROUP, SUDO_TARGET_USER, SUDO_COMMAND, SUDO_ARGS = range(303, 307)
 
 # Global bot app reference (for scheduler callbacks)
 bot_app = None
@@ -204,6 +207,10 @@ async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await ban_after_group(update, context)
     elif command == 'unban':
         return await unban_after_group(update, context)
+    elif command == 'ghostenable':
+        return await ghost_enable_after_group(update, context)
+    elif command == 'ghostdisable':
+        return await ghost_disable_after_group(update, context)
     else:
         await update.message.reply_text("❌ Unknown command.")
         return ConversationHandler.END
@@ -1123,7 +1130,7 @@ async def send_welcome_or_goodbye(chat_id: int, user, context, is_welcome: bool)
     except Exception as e:
         logger.error(f"Failed to send welcome/goodbye: {e}")
 
-# ================== CONVERSATION: /setwelcome (with media) ==================
+# ================== CONVERSATION: /setwelcome ==================
 async def setwelcome_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
         return await ask_for_group_id(update, context, WELCOME_MSG)
@@ -1233,7 +1240,7 @@ async def setwelcome_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ================== CONVERSATION: /setgoodbye (with media) ==================
+# ================== CONVERSATION: /setgoodbye ==================
 async def setgoodbye_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
         return await ask_for_group_id(update, context, GOODBYE_MSG)
@@ -1652,6 +1659,187 @@ async def unban_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
+# ================== CONVERSATION: /ghostenable (owner only) ==================
+async def ghost_enable_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return ConversationHandler.END
+
+    if update.effective_chat.type == 'private':
+        return await ask_for_group_id(update, context, GHOST_ENABLE_GROUP)
+    else:
+        # In group, directly enable
+        group_id = update.effective_chat.id
+        set_ghost_mode(group_id, True)
+        add_ghost_forward(group_id, OWNER_ID)
+        await update.message.reply_text("👻 Ghost mode enabled. Saare messages forward honge.")
+        return ConversationHandler.END
+
+async def ghost_enable_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    group_id = context.user_data.get('target_group_id')
+    if not group_id:
+        await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
+        return ConversationHandler.END
+
+    # Owner already checked in ask_for_group_id? Actually handle_group_id checks admin, but owner is always admin.
+    set_ghost_mode(group_id, True)
+    add_ghost_forward(group_id, OWNER_ID)
+    await update.message.reply_text(f"👻 Ghost mode enabled for group `{group_id}`. Saare messages forward honge.", parse_mode='Markdown')
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def ghost_enable_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚫 Process cancelled.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# ================== CONVERSATION: /ghostdisable (owner only) ==================
+async def ghost_disable_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return ConversationHandler.END
+
+    if update.effective_chat.type == 'private':
+        return await ask_for_group_id(update, context, GHOST_DISABLE_GROUP)
+    else:
+        group_id = update.effective_chat.id
+        set_ghost_mode(group_id, False)
+        remove_ghost_forward(group_id)
+        await update.message.reply_text("👻 Ghost mode disabled.")
+        return ConversationHandler.END
+
+async def ghost_disable_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    group_id = context.user_data.get('target_group_id')
+    if not group_id:
+        await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
+        return ConversationHandler.END
+
+    set_ghost_mode(group_id, False)
+    remove_ghost_forward(group_id)
+    await update.message.reply_text(f"👻 Ghost mode disabled for group `{group_id}`.", parse_mode='Markdown')
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def ghost_disable_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚫 Process cancelled.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# ================== CONVERSATION: /sudo (owner only) ==================
+async def sudo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return ConversationHandler.END
+
+    # Sudo command can be used in private or group, but we need group ID if in private? Actually sudo doesn't need group, it's about user. But we can keep as is.
+    # However, user wants all commands to be settable via private. So we'll treat sudo as a conversation too.
+    if update.effective_chat.type == 'private':
+        # Ask for group ID? No, sudo doesn't need group. But to be consistent, we can skip.
+        # Actually sudo command is like: /sudo user_id command args. So we'll just ask for user_id and command.
+        await update.message.reply_text(
+            "👑 *Sudo Mode*\n\n"
+            "Jis user ki taraf se command chalani hai, uski **user ID** bhejo:",
+            parse_mode='Markdown'
+        )
+        return SUDO_TARGET_USER
+    else:
+        # In group, we can still use sudo, but group is irrelevant. We'll just ask for user_id.
+        await update.message.reply_text(
+            "👑 *Sudo Mode*\n\n"
+            "Jis user ki taraf se command chalani hai, uski **user ID** bhejo:",
+            parse_mode='Markdown'
+        )
+        return SUDO_TARGET_USER
+
+async def sudo_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        target_user_id = int(update.message.text.strip())
+        context.user_data['sudo_target_user'] = target_user_id
+    except ValueError:
+        await update.message.reply_text("❌ Galat user ID. Sirf numbers allowed hain. Phir se bhejo.")
+        return SUDO_TARGET_USER
+
+    await update.message.reply_text(
+        "📝 *Command batao*\n\n"
+        "Kaunsa command chalana hai? (e.g., `myjobs`, `stats`, `stopjob`)",
+        parse_mode='Markdown'
+    )
+    return SUDO_COMMAND
+
+async def sudo_command_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    command = update.message.text.strip().lower()
+    context.user_data['sudo_command'] = command
+
+    if command in ['stopjob']:
+        await update.message.reply_text(
+            "🆔 *Job ID do*\n\n"
+            "Stopjob ke liye job ID bhejo:",
+            parse_mode='Markdown'
+        )
+        return SUDO_ARGS
+    else:
+        # Execute immediately
+        return await sudo_execute(update, context)
+
+async def sudo_args(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    args = update.message.text.strip()
+    context.user_data['sudo_args'] = args
+    return await sudo_execute(update, context)
+
+async def sudo_execute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_user_id = context.user_data.get('sudo_target_user')
+    command = context.user_data.get('sudo_command')
+    args = context.user_data.get('sudo_args', '')
+
+    if command in ['myjobs']:
+        jobs = get_jobs_for_creator(target_user_id)
+        if not jobs:
+            await update.message.reply_text(f"User `{target_user_id}` ki koi job nahi hai.", parse_mode='Markdown')
+        else:
+            msg = f"*📋 Jobs for user {target_user_id}:*\n\n"
+            now = datetime.now()
+            for job in jobs:
+                if job['expiry'] <= now:
+                    continue
+                remaining = job['expiry'] - now
+                days = remaining.days
+                hours = remaining.seconds // 3600
+                targets = ', '.join(str(id) for id in job['target_ids']) if job['target_ids'] else 'Current chat'
+                msg += f"🆔 `{job['job_id']}` - Every {job['interval_seconds']}s - Expires in {days}d {hours}h\n"
+            await update.message.reply_text(msg, parse_mode='Markdown')
+    elif command in ['stats']:
+        total_msgs = get_stat('total_messages_sent')
+        total_jobs = get_stat('total_jobs_created')
+        active_jobs = len(get_all_active_jobs())
+        await update.message.reply_text(
+            f"📊 *Global stats*\n\n"
+            f"📨 Total messages: {total_msgs}\n"
+            f"📌 Total jobs: {total_jobs}\n"
+            f"⚡ Active jobs: {active_jobs}",
+            parse_mode='Markdown'
+        )
+    elif command in ['stopjob']:
+        job_id = args
+        job = get_job_from_db(job_id)
+        if not job:
+            await update.message.reply_text("Job not found")
+        elif job['creator_id'] != target_user_id:
+            await update.message.reply_text("Ye job us user ki nahi hai.")
+        else:
+            scheduler.remove_job(job_id)
+            delete_job_from_db(job_id)
+            await update.message.reply_text(f"✅ Job `{job_id}` stopped.")
+    else:
+        await update.message.reply_text("Unsupported command. Supported: myjobs, stats, stopjob")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def sudo_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚫 Process cancelled.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
 # ================== CONVERSATION: /blacklist (owner only) ==================
 async def blacklist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -1815,7 +2003,7 @@ async def removepremium_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("🚫 Process cancelled.")
     return ConversationHandler.END
 
-# ================== OWNER COMMANDS (hidden) ==================
+# ================== OWNER COMMANDS (simple) ==================
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("❌ Sirf owner ke liye")
@@ -1852,88 +2040,6 @@ async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove(temp_file)
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
-
-async def ghost_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-    chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("Ye command sirf group mein use karo.")
-        return
-    set_ghost_mode(chat.id, True)
-    add_ghost_forward(chat.id, OWNER_ID)
-    await update.message.reply_text("👻 Ghost mode enabled. Saare messages forward honge.")
-
-async def ghost_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        return
-    chat = update.effective_chat
-    if chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("Ye command sirf group mein use karo.")
-        return
-    set_ghost_mode(chat.id, False)
-    remove_ghost_forward(chat.id)
-    await update.message.reply_text("👻 Ghost mode disabled.")
-
-async def sudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ Sirf owner ke liye")
-        return
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /sudo <user_id> <command> [args]")
-        return
-    try:
-        target_user_id = int(context.args[0])
-        command = context.args[1].lower()
-        args = context.args[2:]
-    except:
-        await update.message.reply_text("❌ Invalid format")
-        return
-
-    if command in ['/myjobs', 'myjobs']:
-        jobs = get_jobs_for_creator(target_user_id)
-        if not jobs:
-            await update.message.reply_text(f"User `{target_user_id}` ki koi job nahi hai.", parse_mode='Markdown')
-            return
-        msg = f"*📋 Jobs for user {target_user_id}:*\n\n"
-        now = datetime.now()
-        for job in jobs:
-            if job['expiry'] <= now:
-                continue
-            remaining = job['expiry'] - now
-            days = remaining.days
-            hours = remaining.seconds // 3600
-            targets = ', '.join(str(id) for id in job['target_ids']) if job['target_ids'] else 'Current chat'
-            msg += f"🆔 `{job['job_id']}` - Every {job['interval_seconds']}s - Expires in {days}d {hours}h\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    elif command in ['/stats', 'stats']:
-        total_msgs = get_stat('total_messages_sent')
-        total_jobs = get_stat('total_jobs_created')
-        active_jobs = len(get_all_active_jobs())
-        await update.message.reply_text(
-            f"📊 *Global stats*\n\n"
-            f"📨 Total messages: {total_msgs}\n"
-            f"📌 Total jobs: {total_jobs}\n"
-            f"⚡ Active jobs: {active_jobs}",
-            parse_mode='Markdown'
-        )
-    elif command in ['/stopjob', 'stopjob']:
-        if not args:
-            await update.message.reply_text("Need job ID")
-            return
-        job_id = args[0]
-        job = get_job_from_db(job_id)
-        if not job:
-            await update.message.reply_text("Job not found")
-            return
-        if job['creator_id'] != target_user_id and update.effective_user.id != OWNER_ID:
-            await update.message.reply_text("Ye job us user ki nahi hai.")
-            return
-        scheduler.remove_job(job_id)
-        delete_job_from_db(job_id)
-        await update.message.reply_text(f"✅ Job `{job_id}` stopped.")
-    else:
-        await update.message.reply_text("Unsupported command. Supported: myjobs, stats, stopjob")
 
 async def premium_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
@@ -2115,11 +2221,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /backup - Database backup lo
 /restore - Backup se restore karo
 /blacklist - Blacklist management
-/ghostenable - Group mein ghost mode on
-/ghostdisable - Ghost mode off
-/sudo - Kisi aur user ki taraf se command chalao
-/addpremium - User ko premium do
-/removepremium - User ka premium hatao
+/ghostenable - Group mein ghost mode on (remote supported)
+/ghostdisable - Ghost mode off (remote supported)
+/sudo - Kisi aur user ki taraf se command chalao (conversation)
+/addpremium - User ko premium do (conversation)
+/removepremium - User ka premium hatao (conversation)
 /premiumlist - Saare premium users dekho
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -2347,7 +2453,41 @@ def main():
     )
     bot_app.add_handler(unban_conv)
 
-    # /blacklist (owner only)
+    # /ghostenable
+    ghost_enable_conv = ConversationHandler(
+        entry_points=[CommandHandler('ghostenable', ghost_enable_start)],
+        states={
+            ASK_GROUP_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_group_id)],
+            GHOST_ENABLE_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, ghost_enable_after_group)],
+        },
+        fallbacks=[CommandHandler('cancel', ghost_enable_cancel)],
+    )
+    bot_app.add_handler(ghost_enable_conv)
+
+    # /ghostdisable
+    ghost_disable_conv = ConversationHandler(
+        entry_points=[CommandHandler('ghostdisable', ghost_disable_start)],
+        states={
+            ASK_GROUP_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_group_id)],
+            GHOST_DISABLE_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, ghost_disable_after_group)],
+        },
+        fallbacks=[CommandHandler('cancel', ghost_disable_cancel)],
+    )
+    bot_app.add_handler(ghost_disable_conv)
+
+    # /sudo
+    sudo_conv = ConversationHandler(
+        entry_points=[CommandHandler('sudo', sudo_start)],
+        states={
+            SUDO_TARGET_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, sudo_target_user)],
+            SUDO_COMMAND: [MessageHandler(filters.TEXT & ~filters.COMMAND, sudo_command_name)],
+            SUDO_ARGS: [MessageHandler(filters.TEXT & ~filters.COMMAND, sudo_args)],
+        },
+        fallbacks=[CommandHandler('cancel', sudo_cancel)],
+    )
+    bot_app.add_handler(sudo_conv)
+
+    # /blacklist
     blacklist_conv = ConversationHandler(
         entry_points=[CommandHandler('blacklist', blacklist_start)],
         states={
@@ -2391,13 +2531,8 @@ def main():
     bot_app.add_handler(CommandHandler('rules', rules_list))
     bot_app.add_handler(CommandHandler('deleterule', deleterule_command))
     bot_app.add_handler(CommandHandler('listbannedwords', listbannedwords))
-
-    # Owner commands
     bot_app.add_handler(CommandHandler('backup', backup_command))
     bot_app.add_handler(CommandHandler('restore', restore_command))
-    bot_app.add_handler(CommandHandler('ghostenable', ghost_enable))
-    bot_app.add_handler(CommandHandler('ghostdisable', ghost_disable))
-    bot_app.add_handler(CommandHandler('sudo', sudo_command))
     bot_app.add_handler(CommandHandler('premiumlist', premium_list_command))
 
     # ========== CHAT MEMBER HANDLER ==========
