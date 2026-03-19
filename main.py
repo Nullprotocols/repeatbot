@@ -1,8 +1,9 @@
 # main.py
 # Telegram Repeat Bot – Ultimate Edition (Fully Bug-Fixed)
-# Includes all features: repeat jobs, premium, blacklist, ghost mode, sudo, moderation,
-# welcome/goodbye (with media), auto-reply rules (with media reply), banned words,
-# remote group configuration for ALL group admin commands, and conversation-based commands.
+# Includes all features: repeat jobs, premium, blacklist, ghost mode (with custom destination),
+# sudo, moderation, welcome/goodbye (with media), auto-reply rules (with media reply),
+# banned words, remote group configuration for ALL group admin commands,
+# and conversation-based commands.
 # Fully compatible with Render Web Service (includes dummy HTTP server)
 # Python 3.12.3
 
@@ -72,9 +73,9 @@ BLACKLIST_ACTION, BLACKLIST_ID, BLACKLIST_REASON = range(218, 221)
 
 # Additional states for remote group and sudo
 ASK_GROUP_ID = 300
-GHOST_ENABLE_GROUP = 301
+GHOST_DEST_TYPE = 301
 GHOST_DISABLE_GROUP = 302
-SUDO_GROUP, SUDO_TARGET_USER, SUDO_COMMAND, SUDO_ARGS = range(303, 307)
+SUDO_TARGET_USER, SUDO_COMMAND, SUDO_ARGS = range(303, 306)
 
 # Global bot app reference (for scheduler callbacks)
 bot_app = None
@@ -208,7 +209,9 @@ async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == 'unban':
         return await unban_after_group(update, context)
     elif command == 'ghostenable':
-        return await ghost_enable_after_group(update, context)
+        # After group ID, ask for destination
+        await ghost_enable_ask_dest(update, context)
+        return GHOST_DEST_TYPE
     elif command == 'ghostdisable':
         return await ghost_disable_after_group(update, context)
     else:
@@ -1659,34 +1662,65 @@ async def unban_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ================== CONVERSATION: /ghostenable (owner only) ==================
+# ================== CONVERSATION: /ghostenable (owner only) with custom destination ==================
 async def ghost_enable_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("❌ Sirf owner ke liye")
         return ConversationHandler.END
 
     if update.effective_chat.type == 'private':
-        return await ask_for_group_id(update, context, GHOST_ENABLE_GROUP)
+        return await ask_for_group_id(update, context, GHOST_DEST_TYPE)
     else:
-        # In group, directly enable
+        # In group, directly enable for current group
         group_id = update.effective_chat.id
-        set_ghost_mode(group_id, True)
-        add_ghost_forward(group_id, OWNER_ID)
-        await update.message.reply_text("👻 Ghost mode enabled. Saare messages forward honge.")
-        return ConversationHandler.END
+        context.user_data['target_group_id'] = group_id
+        await ghost_enable_ask_dest(update, context)
+        return GHOST_DEST_TYPE
 
-async def ghost_enable_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ghost_enable_ask_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ask where to forward messages."""
+    await update.message.reply_text(
+        "👻 *Ghost Mode - Destination*\n\n"
+        "Kahan forward karna hai?\n"
+        "• `bot` - Aapke DM (owner) mein forward hoga\n"
+        "• *Ya phir* kisi channel/group ka ID bhejo (jaise: `-100123456789`)",
+        parse_mode='Markdown'
+    )
+    return GHOST_DEST_TYPE
+
+async def ghost_enable_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle destination input."""
+    text = update.message.text.strip().lower()
     group_id = context.user_data.get('target_group_id')
-    if not group_id:
-        await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
+    
+    if text == 'bot':
+        # Forward to owner
+        forward_to = OWNER_ID
+        set_ghost_mode(group_id, True)
+        add_ghost_forward(group_id, forward_to)
+        await update.message.reply_text(f"👻 Ghost mode enabled for group `{group_id}`. Saare messages aapke DM mein forward honge.", parse_mode='Markdown')
+        context.user_data.clear()
         return ConversationHandler.END
-
-    # Owner already checked in ask_for_group_id? Actually handle_group_id checks admin, but owner is always admin.
-    set_ghost_mode(group_id, True)
-    add_ghost_forward(group_id, OWNER_ID)
-    await update.message.reply_text(f"👻 Ghost mode enabled for group `{group_id}`. Saare messages forward honge.", parse_mode='Markdown')
-    context.user_data.clear()
-    return ConversationHandler.END
+    else:
+        # Try to parse as chat ID
+        try:
+            forward_to = int(text)
+            # Optional: verify that the bot can access this chat
+            try:
+                chat = await context.bot.get_chat(forward_to)
+                chat_title = chat.title or chat.first_name or str(forward_to)
+                await update.message.reply_text(f"✅ Destination chat mil gaya: `{chat_title}`")
+            except:
+                await update.message.reply_text("⚠️ Warning: Bot us chat mein nahi ho sakta ya chat exist nahi karti. Phir bhi forward attempt karega.")
+            
+            set_ghost_mode(group_id, True)
+            add_ghost_forward(group_id, forward_to)
+            await update.message.reply_text(f"👻 Ghost mode enabled for group `{group_id}`. Saare messages `{forward_to}` par forward honge.", parse_mode='Markdown')
+            context.user_data.clear()
+            return ConversationHandler.END
+        except ValueError:
+            await update.message.reply_text("❌ Galat input. 'bot' likho ya valid chat ID (number).")
+            return GHOST_DEST_TYPE
 
 async def ghost_enable_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚫 Process cancelled.")
@@ -1731,25 +1765,12 @@ async def sudo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sirf owner ke liye")
         return ConversationHandler.END
 
-    # Sudo command can be used in private or group, but we need group ID if in private? Actually sudo doesn't need group, it's about user. But we can keep as is.
-    # However, user wants all commands to be settable via private. So we'll treat sudo as a conversation too.
-    if update.effective_chat.type == 'private':
-        # Ask for group ID? No, sudo doesn't need group. But to be consistent, we can skip.
-        # Actually sudo command is like: /sudo user_id command args. So we'll just ask for user_id and command.
-        await update.message.reply_text(
-            "👑 *Sudo Mode*\n\n"
-            "Jis user ki taraf se command chalani hai, uski **user ID** bhejo:",
-            parse_mode='Markdown'
-        )
-        return SUDO_TARGET_USER
-    else:
-        # In group, we can still use sudo, but group is irrelevant. We'll just ask for user_id.
-        await update.message.reply_text(
-            "👑 *Sudo Mode*\n\n"
-            "Jis user ki taraf se command chalani hai, uski **user ID** bhejo:",
-            parse_mode='Markdown'
-        )
-        return SUDO_TARGET_USER
+    await update.message.reply_text(
+        "👑 *Sudo Mode*\n\n"
+        "Jis user ki taraf se command chalani hai, uski **user ID** bhejo:",
+        parse_mode='Markdown'
+    )
+    return SUDO_TARGET_USER
 
 async def sudo_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -2220,8 +2241,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *🕵️ Owner Only Commands:*
 /backup - Database backup lo
 /restore - Backup se restore karo
-/blacklist - Blacklist management
-/ghostenable - Group mein ghost mode on (remote supported)
+/blacklist - Blacklist management (conversation)
+/ghostenable - Group mein ghost mode on (custom destination, remote supported)
 /ghostdisable - Ghost mode off (remote supported)
 /sudo - Kisi aur user ki taraf se command chalao (conversation)
 /addpremium - User ko premium do (conversation)
@@ -2238,10 +2259,16 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat:
         save_chat(chat.id, chat.type)
-        # Ghost mode forwarding
+        # Ghost mode forwarding with custom destination
         if chat.type in ['group', 'supergroup'] and is_ghost_mode(chat.id):
             if update.message and update.effective_user.id != OWNER_ID:
-                await context.bot.forward_message(OWNER_ID, chat.id, update.message.message_id)
+                # Get the destination from database
+                forward_to = get_ghost_destination(chat.id)
+                if forward_to:
+                    try:
+                        await context.bot.forward_message(chat_id=forward_to, from_chat_id=chat.id, message_id=update.message.message_id)
+                    except Exception as e:
+                        logger.error(f"Failed to forward ghost message to {forward_to}: {e}")
         # Check rules and banned words for messages
         if update.message:
             await check_rules(update, context)
@@ -2458,7 +2485,7 @@ def main():
         entry_points=[CommandHandler('ghostenable', ghost_enable_start)],
         states={
             ASK_GROUP_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_group_id)],
-            GHOST_ENABLE_GROUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, ghost_enable_after_group)],
+            GHOST_DEST_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ghost_enable_dest)],
         },
         fallbacks=[CommandHandler('cancel', ghost_enable_cancel)],
     )
