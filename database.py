@@ -1,6 +1,7 @@
 # database.py
-# Complete database operations for Telegram Repeat Bot
-# Includes all features: repeat jobs, premium, blacklist, ghost mode, welcome/goodbye, auto-reply rules, warns, backup/restore
+# Complete database operations for Telegram Repeat Bot – Ultimate Edition
+# Includes all features: repeat jobs, premium, blacklist, ghost mode, welcome/goodbye (with media),
+# auto-reply rules (with media reply), warns, banned words, backup/restore.
 # Python 3.12.3 compatible
 # Render Web Service ready – no external dependencies
 
@@ -61,7 +62,7 @@ def init_db():
             chat_id INTEGER NOT NULL,
             message_id INTEGER NOT NULL,
             delete_at TIMESTAMP,
-            rule_id INTEGER,  -- for rule-based auto-delete
+            rule_id INTEGER,
             FOREIGN KEY (job_id) REFERENCES repeat_jobs(job_id)
         )
     ''')
@@ -108,6 +109,22 @@ def init_db():
         )
     ''')
 
+    # Add media columns to group_settings if not exist
+    c.execute("PRAGMA table_info(group_settings)")
+    columns = [col[1] for col in c.fetchall()]
+    if 'welcome_media_type' not in columns:
+        c.execute("ALTER TABLE group_settings ADD COLUMN welcome_media_type TEXT")
+    if 'welcome_media_file_id' not in columns:
+        c.execute("ALTER TABLE group_settings ADD COLUMN welcome_media_file_id TEXT")
+    if 'welcome_caption' not in columns:
+        c.execute("ALTER TABLE group_settings ADD COLUMN welcome_caption TEXT")
+    if 'goodbye_media_type' not in columns:
+        c.execute("ALTER TABLE group_settings ADD COLUMN goodbye_media_type TEXT")
+    if 'goodbye_media_file_id' not in columns:
+        c.execute("ALTER TABLE group_settings ADD COLUMN goodbye_media_file_id TEXT")
+    if 'goodbye_caption' not in columns:
+        c.execute("ALTER TABLE group_settings ADD COLUMN goodbye_caption TEXT")
+
     # Ghost forward mapping
     c.execute('''
         CREATE TABLE IF NOT EXISTS ghost_forward (
@@ -139,6 +156,16 @@ def init_db():
         )
     ''')
 
+    # Add media reply columns to group_rules if not exist
+    c.execute("PRAGMA table_info(group_rules)")
+    columns = [col[1] for col in c.fetchall()]
+    if 'reply_media_type' not in columns:
+        c.execute("ALTER TABLE group_rules ADD COLUMN reply_media_type TEXT")
+    if 'reply_media_file_id' not in columns:
+        c.execute("ALTER TABLE group_rules ADD COLUMN reply_media_file_id TEXT")
+    if 'reply_caption' not in columns:
+        c.execute("ALTER TABLE group_rules ADD COLUMN reply_caption TEXT")
+
     # User warns table
     c.execute('''
         CREATE TABLE IF NOT EXISTS user_warns (
@@ -149,6 +176,18 @@ def init_db():
             warned_by INTEGER,
             warned_at TIMESTAMP,
             reason TEXT
+        )
+    ''')
+
+    # Banned words table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS banned_words (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            word TEXT NOT NULL,
+            created_by INTEGER,
+            created_at TIMESTAMP,
+            UNIQUE(group_id, word)
         )
     ''')
 
@@ -531,7 +570,7 @@ def get_stat(stat_name: str) -> int:
 
 # ================== GROUP SETTINGS (WELCOME/GOODBYE/GHOST) ==================
 def set_group_welcome(group_id: int, message: str, enabled: bool = True):
-    """Set or disable welcome message for a group."""
+    """Set or disable welcome message (text only) for a group."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = datetime.now().isoformat()
@@ -549,7 +588,7 @@ def set_group_welcome(group_id: int, message: str, enabled: bool = True):
     logger.info(f"Welcome message for group {group_id} set to: {message[:50]}...")
 
 def set_group_goodbye(group_id: int, message: str, enabled: bool = True):
-    """Set or disable goodbye message for a group."""
+    """Set or disable goodbye message (text only) for a group."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = datetime.now().isoformat()
@@ -571,7 +610,9 @@ def get_group_settings(group_id: int) -> Dict[str, Any]:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
-        SELECT welcome_enabled, welcome_message, goodbye_enabled, goodbye_message, ghost_mode
+        SELECT welcome_enabled, welcome_message, goodbye_enabled, goodbye_message, ghost_mode,
+               welcome_media_type, welcome_media_file_id, welcome_caption,
+               goodbye_media_type, goodbye_media_file_id, goodbye_caption
         FROM group_settings WHERE group_id = ?
     ''', (group_id,))
     row = c.fetchone()
@@ -582,7 +623,13 @@ def get_group_settings(group_id: int) -> Dict[str, Any]:
             'welcome_message': row[1],
             'goodbye_enabled': bool(row[2]),
             'goodbye_message': row[3],
-            'ghost_mode': bool(row[4])
+            'ghost_mode': bool(row[4]),
+            'welcome_media_type': row[5],
+            'welcome_media_file_id': row[6],
+            'welcome_caption': row[7],
+            'goodbye_media_type': row[8],
+            'goodbye_media_file_id': row[9],
+            'goodbye_caption': row[10],
         }
     else:
         return {
@@ -590,7 +637,13 @@ def get_group_settings(group_id: int) -> Dict[str, Any]:
             'welcome_message': None,
             'goodbye_enabled': False,
             'goodbye_message': None,
-            'ghost_mode': False
+            'ghost_mode': False,
+            'welcome_media_type': None,
+            'welcome_media_file_id': None,
+            'welcome_caption': None,
+            'goodbye_media_type': None,
+            'goodbye_media_file_id': None,
+            'goodbye_caption': None,
         }
 
 def set_ghost_mode(group_id: int, enabled: bool):
@@ -650,7 +703,8 @@ def get_all_ghost_groups() -> List[Dict]:
 def add_rule(group_id: int, trigger_type: str, trigger_pattern: str, is_regex: bool,
              reply_template: str, auto_delete_trigger: bool, auto_delete_reply: bool,
              auto_delete_seconds: int, warn_on_trigger: bool, warn_count: int,
-             notify_user: bool, exempt_admins: bool, created_by: int) -> int:
+             notify_user: bool, exempt_admins: bool, created_by: int,
+             reply_media_type: str = None, reply_media_file_id: str = None, reply_caption: str = None) -> int:
     """Insert a new auto-reply rule. Returns rule_id."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -660,13 +714,13 @@ def add_rule(group_id: int, trigger_type: str, trigger_pattern: str, is_regex: b
             group_id, trigger_type, trigger_pattern, is_regex, reply_template,
             auto_delete_trigger, auto_delete_reply, auto_delete_seconds,
             warn_on_trigger, warn_count, notify_user, exempt_admins,
-            created_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_by, created_at, reply_media_type, reply_media_file_id, reply_caption
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         group_id, trigger_type, trigger_pattern, 1 if is_regex else 0, reply_template,
         1 if auto_delete_trigger else 0, 1 if auto_delete_reply else 0, auto_delete_seconds,
         1 if warn_on_trigger else 0, warn_count, 1 if notify_user else 0, 1 if exempt_admins else 0,
-        created_by, now
+        created_by, now, reply_media_type, reply_media_file_id, reply_caption
     ))
     rule_id = c.lastrowid
     conn.commit()
@@ -684,7 +738,7 @@ def get_rules(group_id: int) -> List[Dict]:
     columns = ['rule_id', 'group_id', 'trigger_type', 'trigger_pattern', 'is_regex',
                'reply_template', 'auto_delete_trigger', 'auto_delete_reply', 'auto_delete_seconds',
                'warn_on_trigger', 'warn_count', 'notify_user', 'exempt_admins',
-               'created_by', 'created_at']
+               'created_by', 'created_at', 'reply_media_type', 'reply_media_file_id', 'reply_caption']
     rules = []
     for row in rows:
         rule = dict(zip(columns, row))
@@ -722,7 +776,7 @@ def get_rule(rule_id: int) -> Optional[Dict]:
     columns = ['rule_id', 'group_id', 'trigger_type', 'trigger_pattern', 'is_regex',
                'reply_template', 'auto_delete_trigger', 'auto_delete_reply', 'auto_delete_seconds',
                'warn_on_trigger', 'warn_count', 'notify_user', 'exempt_admins',
-               'created_by', 'created_at']
+               'created_by', 'created_at', 'reply_media_type', 'reply_media_file_id', 'reply_caption']
     rule = dict(zip(columns, row))
     rule['is_regex'] = bool(rule['is_regex'])
     rule['auto_delete_trigger'] = bool(rule['auto_delete_trigger'])
@@ -765,3 +819,42 @@ def clear_user_warns(user_id: int, group_id: int):
     conn.commit()
     conn.close()
     logger.info(f"All warns cleared for user {user_id} in group {group_id}")
+
+
+# ================== BANNED WORDS FUNCTIONS ==================
+def add_banned_word(group_id: int, word: str, created_by: int):
+    """Add a word to group's banned list."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    try:
+        c.execute('''
+            INSERT INTO banned_words (group_id, word, created_by, created_at)
+            VALUES (?, ?, ?, ?)
+        ''', (group_id, word, created_by, now))
+        conn.commit()
+        logger.info(f"Added banned word '{word}' in group {group_id}")
+    except sqlite3.IntegrityError:
+        # Word already exists – ignore
+        pass
+    finally:
+        conn.close()
+
+def remove_banned_word(group_id: int, word: str) -> bool:
+    """Remove a word from group's banned list."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('DELETE FROM banned_words WHERE group_id = ? AND word = ?', (group_id, word))
+    success = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return success
+
+def get_banned_words(group_id: int) -> List[str]:
+    """Return list of all banned words for a group."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT word FROM banned_words WHERE group_id = ?', (group_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
