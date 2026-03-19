@@ -14,7 +14,7 @@ import sqlite3
 import sys
 import traceback
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, List, Any
 from uuid import uuid4
 
 from telegram import Update, ChatMember, ChatMemberUpdated
@@ -53,10 +53,10 @@ jobstores = {'default': MemoryJobStore()}
 executors = {'default': AsyncIOExecutor()}
 scheduler = AsyncIOScheduler(jobstores=jobstores, executors=executors)
 
-# Conversation states for /setrepeat (already)
+# Conversation states for /setrepeat
 INTERVAL, EXPIRY, CONTENT, TARGETS, AUTO_DELETE = range(5)
 
-# Conversation states for /addrule (already)
+# Conversation states for /addrule
 RULE_TRIGGER_TYPE, RULE_PATTERN, RULE_REPLY, RULE_OPTIONS = range(10, 14)
 
 # New conversation states for various commands
@@ -80,15 +80,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== DELETE WEBHOOK AT STARTUP ==================
-async def delete_webhook():
-    """Delete any existing webhook to allow polling."""
-    try:
-        # We'll call this after creating bot_app, but before polling
-        pass  # will be called in main
-    except Exception as e:
-        logger.error(f"Failed to delete webhook: {e}")
-
 # ================== TIME PARSING ==================
 def parse_time_to_seconds(time_str: str, allow_zero: bool = False) -> Optional[int]:
     """Convert time string like '30s', '10m', '2h', '5d' to seconds."""
@@ -108,20 +99,12 @@ def parse_time_to_seconds(time_str: str, allow_zero: bool = False) -> Optional[i
         return None
 
     if unit == 's':
-        if value < 1 or value > 60:
-            return None
         return value
     elif unit == 'm':
-        if value < 1 or value > 60:
-            return None
         return value * 60
     elif unit == 'h':
-        if value < 1 or value > 24:
-            return None
         return value * 3600
     elif unit == 'd':
-        if value < 1 or value > 30:
-            return None
         return value * 86400
     return None
 
@@ -248,7 +231,6 @@ async def delete_message(job_id: str, chat_id: int, message_id: int):
     try:
         await bot_app.bot.delete_message(chat_id=chat_id, message_id=message_id)
         logger.info(f"Deleted message {message_id} in chat {chat_id} for job {job_id}")
-        # Only remove from DB if deletion succeeded
         delete_sent_message_from_db(message_id, chat_id)
     except Exception as e:
         logger.error(f"Failed to delete message {message_id} in chat {chat_id}: {e}")
@@ -298,9 +280,9 @@ async def setrepeat_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⏱️ *Time interval batao*\n\n"
         "Kitne der baar baar-baar message bhejna hai?\n"
-        "Example: `30s` (30 seconds), `10m` (10 minutes), `2h` (2 hours), `1d` (1 day)\n"
+        "Example: `30s`, `10m`, `2h`, `1d`\n"
         "Ya sidhe seconds mein number: `60`, `3600`\n\n"
-        "*Range:*\n• Seconds: 1–60\n• Minutes: 1–60\n• Hours: 1–24\n• Days: 1–30",
+        "*Note:* Seconds 1 se zyada, minutes 1 se zyada, hours 1 se zyada, days 1 se zyada ho sakte hain.",
         parse_mode='Markdown'
     )
     return INTERVAL
@@ -309,7 +291,7 @@ async def setrepeat_interval(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.message.text.strip()
     seconds = parse_time_to_seconds(text, allow_zero=False)
     if seconds is None:
-        await update.message.reply_text("❌ *Galat format ya range se bahar.*", parse_mode='Markdown')
+        await update.message.reply_text("❌ *Galat format.*", parse_mode='Markdown')
         return INTERVAL
     context.user_data['interval_seconds'] = seconds
     await update.message.reply_text(
@@ -323,7 +305,7 @@ async def setrepeat_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     delta = parse_expiry_to_timedelta(text)
     if delta is None:
-        await update.message.reply_text("❌ *Galat format ya range se bahar.*", parse_mode='Markdown')
+        await update.message.reply_text("❌ *Galat format.*", parse_mode='Markdown')
         return EXPIRY
     context.user_data['expiry_delta'] = delta
     await update.message.reply_text(
@@ -429,7 +411,7 @@ async def setrepeat_autodelete(update: Update, context: ContextTypes.DEFAULT_TYP
     if text and text != '.':
         auto_delete_seconds = parse_time_to_seconds(text, allow_zero=False)
         if auto_delete_seconds is None:
-            await update.message.reply_text("❌ *Galat format ya range se bahar.*", parse_mode='Markdown')
+            await update.message.reply_text("❌ *Galat format.*", parse_mode='Markdown')
             return AUTO_DELETE
 
     # Create job
@@ -489,7 +471,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ================== CONVERSATION: /addrule (already, but updated to support media reply) ==================
+# ================== CONVERSATION: /addrule ==================
 async def addrule_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
@@ -967,7 +949,6 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 3. Warn user
         if rule['warn_on_trigger'] and rule['warn_count'] > 0:
             add_warn(user.id, chat.id, rule['rule_id'], update.effective_user.id, f"Rule {rule['rule_id']} triggered")
-            current_warns = get_user_warns(user.id, chat.id)
             # Optional: take action if warns exceed threshold (can be added later)
 
         # 4. Notify user via DM
@@ -1000,7 +981,6 @@ async def check_banned_words(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Exempt owner and admins
     if user.id == OWNER_ID or await is_group_admin(update, context, user.id):
         return
-    from database import get_banned_words
     banned = get_banned_words(chat.id)
     if not banned:
         return
@@ -1013,8 +993,6 @@ async def check_banned_words(update: Update, context: ContextTypes.DEFAULT_TYPE)
             try:
                 await message.delete()
                 logger.info(f"Deleted message containing banned word '{word}' from {user.id} in {chat.id}")
-                # Optional: notify user
-                # await context.bot.send_message(user.id, f"Your message was deleted because it contains banned word: {word}")
                 break
             except Exception as e:
                 logger.error(f"Failed to delete banned message: {e}")
@@ -1023,7 +1001,6 @@ async def check_banned_words(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ================== WELCOME/GOODBYE MEDIA SENDER ==================
 async def send_welcome_or_goodbye(chat_id: int, user, context, is_welcome: bool):
     """Send welcome or goodbye message with optional media."""
-    from database import get_group_settings
     settings = get_group_settings(chat_id)
     
     if is_welcome:
@@ -1108,12 +1085,10 @@ async def setwelcome_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return WELCOME_MEDIA
     elif text == 'off':
-        from database import set_group_welcome
         set_group_welcome(update.effective_chat.id, "", False)
         await update.message.reply_text("✅ Welcome message disabled.")
         return ConversationHandler.END
     else:
-        from database import set_group_welcome
         set_group_welcome(update.effective_chat.id, update.message.text, True)
         await update.message.reply_text(f"✅ Welcome text message set ho gaya!")
         return ConversationHandler.END
@@ -1207,12 +1182,10 @@ async def setgoodbye_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return GOODBYE_MEDIA
     elif text == 'off':
-        from database import set_group_goodbye
         set_group_goodbye(update.effective_chat.id, "", False)
         await update.message.reply_text("✅ Goodbye message disabled.")
         return ConversationHandler.END
     else:
-        from database import set_group_goodbye
         set_group_goodbye(update.effective_chat.id, update.message.text, True)
         await update.message.reply_text(f"✅ Goodbye text message set ho gaya!")
         return ConversationHandler.END
@@ -1298,7 +1271,6 @@ async def addbannedword_receive(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Koi word nahi mila.")
         return ConversationHandler.END
     
-    from database import add_banned_word
     group_id = update.effective_chat.id
     added = 0
     for w in words:
@@ -1336,7 +1308,6 @@ async def removebannedword_receive(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("❌ Koi word nahi mila.")
         return ConversationHandler.END
     
-    from database import remove_banned_word
     group_id = update.effective_chat.id
     removed = 0
     not_found = 0
@@ -1534,7 +1505,6 @@ async def blacklist_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def blacklist_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = update.message.text.strip().lower()
     if action == 'list':
-        from database import get_all_blacklisted
         blacklisted = get_all_blacklisted()
         if not blacklisted:
             await update.message.reply_text("📭 Blacklist empty hai.")
@@ -1576,7 +1546,6 @@ async def blacklist_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📝 *Reason (optional)*\n\nReason likho ya 'skip':", parse_mode='Markdown')
         return BLACKLIST_REASON
     else:  # remove
-        from database import remove_from_blacklist
         if remove_from_blacklist(target_id):
             await update.message.reply_text(f"✅ `{target_id}` blacklist se hata diya.", parse_mode='Markdown')
         else:
@@ -1590,8 +1559,6 @@ async def blacklist_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = "No reason"
     
     target_id = context.user_data['blacklist_target']
-    from database import add_to_blacklist
-    # Determine target type (user/chat) – optional, just store as 'user' for simplicity
     add_to_blacklist(target_id, 'user', reason, update.effective_user.id)
     await update.message.reply_text(f"✅ `{target_id}` blacklist mein add ho gaya.\nReason: {reason}", parse_mode='Markdown')
     context.user_data.clear()
@@ -1681,12 +1648,162 @@ async def removepremium_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("🚫 Process cancelled.")
     return ConversationHandler.END
 
-# ================== HIDDEN FEATURES (owner commands, already exist) ==================
-# ... (backup, restore, ghost, sudo, etc. – already present in original code)
-# For brevity, I'll keep them as they were; but to ensure completeness,
-# we need to include all original owner/hidden command handlers.
-# They are already in the original code, so I'm not repeating them here.
-# Just ensure that in main() we also add them.
+# ================== OWNER COMMANDS (hidden) ==================
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return
+    try:
+        backup_file = create_backup()
+        with open(backup_file, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=backup_file,
+                caption=f"📀 *Database Backup*\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                parse_mode='Markdown'
+            )
+        os.remove(backup_file)
+        cleanup_old_backups()
+    except Exception as e:
+        await update.message.reply_text(f"❌ Backup failed: {str(e)}")
+
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return
+    if not update.message.reply_to_message or not update.message.reply_to_message.document:
+        await update.message.reply_text("❌ Please reply to a backup file with /restore")
+        return
+    try:
+        file = await context.bot.get_file(update.message.reply_to_message.document.file_id)
+        temp_file = "temp_restore.db"
+        await file.download_to_drive(temp_file)
+        if restore_from_backup(temp_file):
+            await update.message.reply_text("✅ *Database restored successfully!*", parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ Restore failed")
+        os.remove(temp_file)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def ghost_enable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Ye command sirf group mein use karo.")
+        return
+    set_ghost_mode(chat.id, True)
+    add_ghost_forward(chat.id, OWNER_ID)
+    await update.message.reply_text("👻 Ghost mode enabled. Saare messages forward honge.")
+
+async def ghost_disable(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        return
+    chat = update.effective_chat
+    if chat.type not in ['group', 'supergroup']:
+        await update.message.reply_text("Ye command sirf group mein use karo.")
+        return
+    set_ghost_mode(chat.id, False)
+    remove_ghost_forward(chat.id)
+    await update.message.reply_text("👻 Ghost mode disabled.")
+
+async def sudo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /sudo <user_id> <command> [args]")
+        return
+    try:
+        target_user_id = int(context.args[0])
+        command = context.args[1].lower()
+        args = context.args[2:]
+    except:
+        await update.message.reply_text("❌ Invalid format")
+        return
+
+    if command in ['/myjobs', 'myjobs']:
+        jobs = get_jobs_for_creator(target_user_id)
+        if not jobs:
+            await update.message.reply_text(f"User `{target_user_id}` ki koi job nahi hai.", parse_mode='Markdown')
+            return
+        msg = f"*📋 Jobs for user {target_user_id}:*\n\n"
+        now = datetime.now()
+        for job in jobs:
+            if job['expiry'] <= now:
+                continue
+            remaining = job['expiry'] - now
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            targets = ', '.join(str(id) for id in job['target_ids']) if job['target_ids'] else 'Current chat'
+            msg += f"🆔 `{job['job_id']}` - Every {job['interval_seconds']}s - Expires in {days}d {hours}h\n"
+        await update.message.reply_text(msg, parse_mode='Markdown')
+    elif command in ['/stats', 'stats']:
+        total_msgs = get_stat('total_messages_sent')
+        total_jobs = get_stat('total_jobs_created')
+        active_jobs = len(get_all_active_jobs())
+        await update.message.reply_text(
+            f"📊 *Global stats*\n\n"
+            f"📨 Total messages: {total_msgs}\n"
+            f"📌 Total jobs: {total_jobs}\n"
+            f"⚡ Active jobs: {active_jobs}",
+            parse_mode='Markdown'
+        )
+    elif command in ['/stopjob', 'stopjob']:
+        if not args:
+            await update.message.reply_text("Need job ID")
+            return
+        job_id = args[0]
+        job = get_job_from_db(job_id)
+        if not job:
+            await update.message.reply_text("Job not found")
+            return
+        if job['creator_id'] != target_user_id and update.effective_user.id != OWNER_ID:
+            await update.message.reply_text("Ye job us user ki nahi hai.")
+            return
+        scheduler.remove_job(job_id)
+        delete_job_from_db(job_id)
+        await update.message.reply_text(f"✅ Job `{job_id}` stopped.")
+    else:
+        await update.message.reply_text("Unsupported command. Supported: myjobs, stats, stopjob")
+
+async def premium_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return
+    premium_users = get_all_premium_users()
+    if not premium_users:
+        await update.message.reply_text("📭 Koi premium user nahi hai.")
+        return
+    msg = "*👑 Premium users:*\n\n"
+    now = datetime.now()
+    for user in premium_users:
+        expiry = user['expiry']
+        if expiry:
+            remaining = expiry - now
+            if remaining.total_seconds() > 0:
+                days = remaining.days
+                hours = remaining.seconds // 3600
+                expiry_text = f"{days}d {hours}h remaining"
+            else:
+                expiry_text = "Expired"
+        else:
+            expiry_text = "Never"
+        msg += f"• `{user['user_id']}` – {expiry_text}\n"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+# ================== LIST BANNED WORDS ==================
+async def listbannedwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_group_admin(update, context):
+        await update.message.reply_text("❌ Sirf group admin ye command use kar sakte hain.")
+        return
+    words = get_banned_words(update.effective_chat.id)
+    if not words:
+        await update.message.reply_text("📭 Is group mein koi banned word nahi hai.")
+        return
+    msg = "*🚫 Banned Words:*\n" + "\n".join(f"• `{w}`" for w in words)
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ================== BASIC COMMANDS ==================
 async def stop_job(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1821,7 +1938,7 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check rules for messages
         if update.message:
             await check_rules(update, context)
-            await check_banned_words(update, context)   # <-- added
+            await check_banned_words(update, context)
 
     if user:
         save_user(user.id)
@@ -2066,8 +2183,7 @@ def main():
     bot_app.add_handler(CommandHandler('deleterule', deleterule_command))
     bot_app.add_handler(CommandHandler('listbannedwords', listbannedwords))
 
-    # Owner commands (already existing in original code – ensure they are added)
-    # For completeness, include them here:
+    # Owner commands (hidden)
     bot_app.add_handler(CommandHandler('backup', backup_command))
     bot_app.add_handler(CommandHandler('restore', restore_command))
     bot_app.add_handler(CommandHandler('ghostenable', ghost_enable))
