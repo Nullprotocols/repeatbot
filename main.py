@@ -1,11 +1,10 @@
 # main.py
-# Telegram Repeat Bot – Ultimate Edition (Fully Bug-Fixed)
+# Telegram Repeat Bot – Ultimate Edition (Fully Bug-Fixed + Multi-Group Banned Words)
 # Includes all features: repeat jobs, premium, blacklist, ghost mode (with custom destination),
 # sudo, moderation, welcome/goodbye (with media), auto-reply rules (with media reply),
 # banned words, remote group configuration for ALL group admin commands,
-# and conversation-based commands.
-# Fully compatible with Render Web Service (includes dummy HTTP server)
-# Python 3.12.3
+# conversation-based commands, and multi-group banned words support.
+# Compatible with Render Web Service.
 
 import os
 import logging
@@ -46,21 +45,15 @@ TOKEN = os.environ.get("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN environment variable not set!")
 
-# Owner ID – fixed as per user
 OWNER_ID = 8104850843
 
-# Scheduler setup
 jobstores = {'default': MemoryJobStore()}
 executors = {'default': AsyncIOExecutor()}
 scheduler = AsyncIOScheduler(jobstores=jobstores, executors=executors)
 
-# Conversation states for /setrepeat
+# Conversation states
 INTERVAL, EXPIRY, CONTENT, TARGETS, AUTO_DELETE = range(5)
-
-# Conversation states for /addrule
 RULE_TRIGGER_TYPE, RULE_PATTERN, RULE_REPLY, RULE_OPTIONS = range(10, 14)
-
-# Conversation states for various commands
 WELCOME_MSG, WELCOME_MEDIA = range(200, 202)
 GOODBYE_MSG, GOODBYE_MEDIA = range(203, 205)
 PREMIUM_USER_ID, PREMIUM_DURATION = range(206, 208)
@@ -70,17 +63,13 @@ KICK_USER, KICK_REASON = range(211, 213)
 BAN_USER, BAN_REASON = range(214, 216)
 UNBAN_USER = 217
 BLACKLIST_ACTION, BLACKLIST_ID, BLACKLIST_REASON = range(218, 221)
-
-# Additional states for remote group and sudo
 ASK_GROUP_ID = 300
 GHOST_DEST_TYPE = 301
 GHOST_DISABLE_GROUP = 302
 SUDO_TARGET_USER, SUDO_COMMAND, SUDO_ARGS = range(303, 306)
 
-# Global bot app reference (for scheduler callbacks)
 bot_app = None
 
-# ================== LOGGING ==================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -89,7 +78,6 @@ logger = logging.getLogger(__name__)
 
 # ================== TIME PARSING ==================
 def parse_time_to_seconds(time_str: str, allow_zero: bool = False) -> Optional[int]:
-    """Convert time string like '30s', '10m', '2h', '5d' to seconds."""
     if not time_str:
         return None
     time_str = time_str.strip().lower()
@@ -123,14 +111,12 @@ def parse_expiry_to_timedelta(expiry_str: str) -> Optional[timedelta]:
 
 # ================== PERMISSION CHECK ==================
 async def check_premium_and_notify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if user is premium and not blacklisted. If not, notify."""
     user = update.effective_user
     if not user:
         return False
 
     save_user(user.id)
 
-    # Check blacklist
     if is_blacklisted(user.id):
         await update.message.reply_text("❌ Aap blacklisted hain. Bot use nahi kar sakte.")
         return False
@@ -147,9 +133,8 @@ async def check_premium_and_notify(update: Update, context: ContextTypes.DEFAULT
     )
     return False
 
-# ================== HELPER: GROUP ADMIN CHECK (by group_id) ==================
+# ================== HELPER: GROUP ADMIN CHECK ==================
 async def is_user_admin_in_group(user_id: int, group_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if a user is admin in a specific group (or owner)."""
     if user_id == OWNER_ID:
         return True
     try:
@@ -161,34 +146,43 @@ async def is_user_admin_in_group(user_id: int, group_id: int, context: ContextTy
 
 # ================== HELPER: ASK FOR GROUP ID IN PRIVATE ==================
 async def ask_for_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE, next_state: int):
-    """Ask user to provide group ID when command is used in private chat."""
     command = update.message.text.split()[0][1:]  # remove '/'
     context.user_data['command_name'] = command
     context.user_data['next_state_after_group'] = next_state
     await update.message.reply_text(
         "🔍 *Aapne ye command private mein use ki hai.*\n\n"
-        "Kripya us group ka **ID** bhejein jisme aap ye setting apply karna chahte hain.",
+        "Kripya us group ka **ID** bhejein jisme aap ye setting apply karna chahte hain.\n"
+        "Agar ek se zyada groups mein apply karna hai to IDs space se alag karein.\n"
+        "Example: `-100123456789 -100987654321`",
         parse_mode='Markdown'
     )
     return ASK_GROUP_ID
 
 async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the group ID input and verify admin status."""
     text = update.message.text.strip()
-    try:
-        group_id = int(text)
-    except ValueError:
-        await update.message.reply_text("❌ Galat ID. Sirf numbers allow hain. Phir se koshish karein.")
-        return ASK_GROUP_ID
+    group_ids = []
+    for part in text.split():
+        try:
+            group_id = int(part)
+            group_ids.append(group_id)
+        except ValueError:
+            await update.message.reply_text("❌ Galat ID. Sirf numbers allow hain. Phir se koshish karein.")
+            return ASK_GROUP_ID
 
-    # Check if user is admin in that group
     user_id = update.effective_user.id
-    if not await is_user_admin_in_group(user_id, group_id, context):
-        await update.message.reply_text("❌ Aap us group ke admin nahi hain. Isliye ye setting apply nahi kar sakte.")
+    # Verify admin for all groups
+    invalid_groups = []
+    for gid in group_ids:
+        if not await is_user_admin_in_group(user_id, gid, context):
+            invalid_groups.append(gid)
+    if invalid_groups:
+        await update.message.reply_text(
+            f"❌ Aap following groups ke admin nahi hain: {', '.join(str(g) for g in invalid_groups)}\n"
+            "Isliye ye setting apply nahi kar sakte."
+        )
         return ConversationHandler.END
 
-    # Store group_id in user_data
-    context.user_data['target_group_id'] = group_id
+    context.user_data['target_group_ids'] = group_ids
     command = context.user_data.get('command_name')
 
     # Route to the appropriate after_group function
@@ -209,7 +203,6 @@ async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif command == 'unban':
         return await unban_after_group(update, context)
     elif command == 'ghostenable':
-        # After group ID, ask for destination
         await ghost_enable_ask_dest(update, context)
         return GHOST_DEST_TYPE
     elif command == 'ghostdisable':
@@ -220,7 +213,6 @@ async def handle_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== SEND MEDIA FUNCTIONS ==================
 async def send_media_to_target(chat_id: int, job: Dict):
-    """Send the appropriate media to a target chat."""
     global bot_app
     media_type = job['media_type']
     caption = job['caption'] or ""
@@ -256,7 +248,6 @@ async def send_media_to_target(chat_id: int, job: Dict):
         increment_stat('total_messages_sent')
         logger.info(f"Message sent for job {job['job_id']} to chat {chat_id}")
 
-        # Handle auto-delete
         auto_delete = job.get('auto_delete_seconds')
         if auto_delete and auto_delete > 0:
             delete_at = datetime.now() + timedelta(seconds=auto_delete)
@@ -275,7 +266,6 @@ async def send_media_to_target(chat_id: int, job: Dict):
         return False
 
 async def send_media_by_job(job: Dict):
-    """Send the job's media to all targets."""
     targets = job.get('target_ids')
     if not targets:
         targets = [job['source_chat_id']]
@@ -289,7 +279,6 @@ async def send_media_by_job(job: Dict):
     return success_count
 
 async def delete_message(job_id: str, chat_id: int, message_id: int):
-    """Delete a specific message and remove from tracking."""
     global bot_app
     try:
         await bot_app.bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -300,7 +289,6 @@ async def delete_message(job_id: str, chat_id: int, message_id: int):
 
 # ================== SCHEDULED JOB FUNCTION ==================
 async def send_scheduled_message(job_id: str):
-    """Callback for APScheduler to send a repeat message."""
     job = get_job_from_db(job_id)
     if not job:
         scheduler.remove_job(job_id)
@@ -314,7 +302,6 @@ async def send_scheduled_message(job_id: str):
 
 # ================== AUTO BACKUP JOB ==================
 async def auto_backup_job():
-    """Daily automatic backup sent to owner."""
     try:
         backup_file = create_backup()
         with open(backup_file, 'rb') as f:
@@ -333,7 +320,6 @@ async def auto_backup_job():
 
 # ================== TEST COMMAND ==================
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Simple test command to check if bot is alive."""
     await update.message.reply_text("✅ Bot is working! Test successful.")
 
 # ================== CONVERSATION: /setrepeat ==================
@@ -477,7 +463,6 @@ async def setrepeat_autodelete(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("❌ *Galat format.*", parse_mode='Markdown')
             return AUTO_DELETE
 
-    # Create job
     creator_id = update.effective_user.id
     source_chat_id = update.effective_chat.id
     interval_seconds = context.user_data['interval_seconds']
@@ -543,7 +528,7 @@ async def addrule_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await addrule_after_group(update, context)
 
 async def addrule_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if not group_id:
         await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
         return ConversationHandler.END
@@ -595,11 +580,10 @@ async def addrule_pattern(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pattern = text
 
     if text == '.':
-        pattern = None  # Type-based only
+        pattern = None
     elif text.startswith('/') and text.endswith('/') and len(text) > 2:
         is_regex = True
-        pattern = text[1:-1]  # Remove slashes
-        # Validate regex
+        pattern = text[1:-1]
         try:
             re.compile(pattern)
         except re.error:
@@ -626,7 +610,6 @@ async def addrule_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("❌ Kuch gadbad hui.")
         return ConversationHandler.END
 
-    # Detect media type
     if message.text:
         context.user_data['reply_media_type'] = 'text'
         context.user_data['reply_text'] = message.text
@@ -660,7 +643,6 @@ async def addrule_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Unsupported media type for reply. Please send text, photo, video, document, voice, sticker, etc.")
         return RULE_REPLY
 
-    # Proceed to options
     options_text = (
         "*⚙️ Additional Options*\n\n"
         "Ab aap kuch extra options set kar sakte hain. Har option ke liye 'y' ya 'n' likho.\n\n"
@@ -675,12 +657,12 @@ async def addrule_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
     step = context.user_data['rule_options_step']
 
-    if step == 0:  # auto_delete_trigger
+    if step == 0:
         context.user_data['rule_options']['auto_delete_trigger'] = text in ['y', 'yes']
         await update.message.reply_text("2. **Reply ko auto-delete karna hai?** (y/n): ", parse_mode='Markdown')
         context.user_data['rule_options_step'] = 1
 
-    elif step == 1:  # auto_delete_reply
+    elif step == 1:
         if text in ['y', 'yes']:
             context.user_data['rule_options']['auto_delete_reply'] = True
             await update.message.reply_text("   Kitne seconds baad delete karna hai? (e.g., 60): ")
@@ -691,7 +673,7 @@ async def addrule_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("3. **Warn count badhana hai?** (y/n): ", parse_mode='Markdown')
             context.user_data['rule_options_step'] = 3
 
-    elif step == 2:  # auto_delete_seconds
+    elif step == 2:
         try:
             secs = int(text)
             if secs < 0:
@@ -702,7 +684,7 @@ async def addrule_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("3. **Warn count badhana hai?** (y/n): ", parse_mode='Markdown')
         context.user_data['rule_options_step'] = 3
 
-    elif step == 3:  # warn_on_trigger
+    elif step == 3:
         if text in ['y', 'yes']:
             context.user_data['rule_options']['warn_on_trigger'] = True
             await update.message.reply_text("   Kitne warn badhane hain? (1-5): ")
@@ -713,7 +695,7 @@ async def addrule_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("4. **User ko DM notify karna hai?** (y/n): ", parse_mode='Markdown')
             context.user_data['rule_options_step'] = 5
 
-    elif step == 4:  # warn_count
+    elif step == 4:
         try:
             count = int(text)
             if count < 1 or count > 5:
@@ -724,16 +706,15 @@ async def addrule_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("4. **User ko DM notify karna hai?** (y/n): ", parse_mode='Markdown')
         context.user_data['rule_options_step'] = 5
 
-    elif step == 5:  # notify_user
+    elif step == 5:
         context.user_data['rule_options']['notify_user'] = text in ['y', 'yes']
         await update.message.reply_text("5. **Admins ko exempt karna hai?** (y/n): ", parse_mode='Markdown')
         context.user_data['rule_options_step'] = 6
 
-    elif step == 6:  # exempt_admins
+    elif step == 6:
         context.user_data['rule_options']['exempt_admins'] = text in ['y', 'yes']
 
-        # Save rule
-        group_id = context.user_data.get('target_group_id')
+        group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
         trigger_type = context.user_data['rule_trigger_type']
         pattern = context.user_data['rule_pattern']
         is_regex = context.user_data['rule_is_regex']
@@ -910,13 +891,18 @@ async def send_rule_reply(rule, message, context):
             return await context.bot.send_video_note(chat_id=chat_id, video_note=rule['reply_media_file_id'], reply_to_message_id=reply_to)
         elif media_type == 'sticker':
             return await context.bot.send_sticker(chat_id=chat_id, sticker=rule['reply_media_file_id'], reply_to_message_id=reply_to)
+        else:
+            if rule.get('reply_template'):
+                text = rule['reply_template']
+                if '{mention}' in text:
+                    text = text.replace('{mention}', mention)
+                return await context.bot.send_message(chat_id=chat_id, text=text, reply_to_message_id=reply_to, parse_mode='HTML')
     except Exception as e:
         logger.error(f"Failed to send rule reply: {e}")
         return None
 
 # ================== RULE CHECKER ==================
 async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check incoming message against group rules."""
     chat = update.effective_chat
     if chat.type not in ['group', 'supergroup']:
         return
@@ -929,7 +915,6 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
-    # Owner always exempt
     if user.id == OWNER_ID:
         return
 
@@ -937,7 +922,6 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rules:
         return
 
-    # Check if user is admin
     is_admin = False
     try:
         member = await chat.get_member(user.id)
@@ -945,7 +929,6 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    # Determine message type and content
     msg_type = None
     content = None
     caption = None
@@ -983,18 +966,17 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if rule['exempt_admins'] and is_admin and user.id != OWNER_ID:
             continue
 
-        # Pattern matching
         match = False
         if rule['trigger_pattern'] is None:
-            match = True  # Type-based only
+            match = True
         else:
             check_text = content or caption or ""
             if rule['is_regex']:
                 try:
                     if re.search(rule['trigger_pattern'], check_text, re.IGNORECASE):
                         match = True
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Regex error in rule {rule['rule_id']}: {e}")
             else:
                 if rule['trigger_pattern'].lower() in check_text.lower():
                     match = True
@@ -1004,7 +986,6 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"Rule {rule['rule_id']} triggered by {user.id} in {chat.id}")
 
-        # 1. Auto-delete trigger message
         if rule['auto_delete_trigger']:
             try:
                 await message.delete()
@@ -1012,7 +993,6 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Failed to delete trigger: {e}")
 
-        # 2. Send reply
         reply_msg = await send_rule_reply(rule, message, context)
         if reply_msg and rule['auto_delete_reply'] and rule['auto_delete_seconds'] > 0:
             delete_at = datetime.now() + timedelta(seconds=rule['auto_delete_seconds'])
@@ -1025,11 +1005,9 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 replace_existing=True
             )
 
-        # 3. Warn user
         if rule['warn_on_trigger'] and rule['warn_count'] > 0:
             add_warn(user.id, chat.id, rule['rule_id'], update.effective_user.id, f"Rule {rule['rule_id']} triggered")
 
-        # 4. Notify user via DM
         if rule['notify_user']:
             try:
                 await context.bot.send_message(
@@ -1042,7 +1020,6 @@ async def check_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
 
-        # Only first matching rule applies
         break
 
 # ================== BANNED WORDS CHECKER ==================
@@ -1059,9 +1036,11 @@ async def check_banned_words(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         member = await chat.get_member(user.id)
         if member.status in ['administrator', 'creator']:
+            logger.info(f"User {user.id} is admin/creator, skipping banned word check")
             return
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to check member status for {user.id} in {chat.id}: {e}")
+        return
 
     banned = get_banned_words(chat.id)
     if not banned:
@@ -1082,7 +1061,6 @@ async def check_banned_words(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ================== WELCOME/GOODBYE MEDIA SENDER ==================
 async def send_welcome_or_goodbye(chat_id: int, user, context, is_welcome: bool):
-    """Send welcome or goodbye message with optional media."""
     settings = get_group_settings(chat_id)
     
     if is_welcome:
@@ -1103,7 +1081,6 @@ async def send_welcome_or_goodbye(chat_id: int, user, context, is_welcome: bool)
     
     name = user.mention_html() if user.username else user.full_name
     
-    # Replace {name} in text and caption
     if text:
         text = text.replace('{name}', name)
     if caption:
@@ -1142,7 +1119,7 @@ async def setwelcome_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await setwelcome_after_group(update, context)
 
 async def setwelcome_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if not group_id:
         await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
         return ConversationHandler.END
@@ -1164,7 +1141,7 @@ async def setwelcome_after_group(update: Update, context: ContextTypes.DEFAULT_T
 
 async def setwelcome_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if text == 'media':
         await update.message.reply_text(
             "📸 *Media Welcome*\n\n"
@@ -1186,7 +1163,7 @@ async def setwelcome_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def setwelcome_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     
     media_type = None
     file_id = None
@@ -1217,7 +1194,6 @@ async def setwelcome_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Unsupported media type. Please send photo, video, document, etc.")
         return WELCOME_MEDIA
     
-    # Save to database
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     now = datetime.now().isoformat()
@@ -1252,7 +1228,7 @@ async def setgoodbye_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await setgoodbye_after_group(update, context)
 
 async def setgoodbye_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if not group_id:
         await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
         return ConversationHandler.END
@@ -1274,7 +1250,7 @@ async def setgoodbye_after_group(update: Update, context: ContextTypes.DEFAULT_T
 
 async def setgoodbye_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if text == 'media':
         await update.message.reply_text(
             "📸 *Media Goodbye*\n\n"
@@ -1296,7 +1272,7 @@ async def setgoodbye_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def setgoodbye_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     
     media_type = None
     file_id = None
@@ -1354,17 +1330,59 @@ async def setgoodbye_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== CONVERSATION: /addbannedword ==================
 async def addbannedword_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == 'private':
-        return await ask_for_group_id(update, context, BANNED_WORD_INPUT)
+    # If in private and args provided, treat as group IDs
+    if update.effective_chat.type == 'private' and context.args:
+        group_ids = []
+        for arg in context.args:
+            try:
+                gid = int(arg)
+                group_ids.append(gid)
+            except ValueError:
+                await update.message.reply_text(f"❌ Galat group ID: {arg}")
+                return ConversationHandler.END
+        user_id = update.effective_user.id
+        invalid = []
+        for gid in group_ids:
+            if not await is_user_admin_in_group(user_id, gid, context):
+                invalid.append(gid)
+        if invalid:
+            await update.message.reply_text(f"❌ Aap following groups ke admin nahi hain: {', '.join(str(g) for g in invalid)}")
+            return ConversationHandler.END
+        context.user_data['target_group_ids'] = group_ids
+        # Go directly to banned word input
+        await update.message.reply_text(
+            "🚫 *Banned Word Add Karein*\n\n"
+            "Ek ya multiple words likho (comma ya space se separate kar sakte ho).\n"
+            "Example: `hello world` ya `hello, world`",
+            parse_mode='Markdown'
+        )
+        return BANNED_WORD_INPUT
     else:
-        context.user_data['target_group_id'] = update.effective_chat.id
-        return await addbannedword_after_group(update, context)
+        # Normal conversation
+        if update.effective_chat.type == 'private':
+            return await ask_for_group_id(update, context, BANNED_WORD_INPUT)
+        else:
+            context.user_data['target_group_id'] = update.effective_chat.id
+            return await addbannedword_after_group(update, context)
 
 async def addbannedword_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = context.user_data.get('target_group_id')
     if not group_id:
-        await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
-        return ConversationHandler.END
+        # If we have multiple IDs, use them
+        group_ids = context.user_data.get('target_group_ids')
+        if group_ids:
+            context.user_data['target_group_ids'] = group_ids
+            # Continue to input
+            await update.message.reply_text(
+                "🚫 *Banned Word Add Karein*\n\n"
+                "Ek ya multiple words likho (comma ya space se separate kar sakte ho).\n"
+                "Example: `hello world` ya `hello, world`",
+                parse_mode='Markdown'
+            )
+            return BANNED_WORD_INPUT
+        else:
+            await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
+            return ConversationHandler.END
 
     if update.effective_chat.type != 'private':
         if not await is_user_admin_in_group(update.effective_user.id, group_id, context):
@@ -1381,7 +1399,14 @@ async def addbannedword_after_group(update: Update, context: ContextTypes.DEFAUL
 
 async def addbannedword_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = update.message.text.strip()
-    group_id = context.user_data.get('target_group_id')
+    group_ids = context.user_data.get('target_group_ids', [])
+    single_group = context.user_data.get('target_group_id')
+    if single_group:
+        group_ids = [single_group]
+    if not group_ids:
+        await update.message.reply_text("❌ Koi group ID nahi mila. Phir se try karein.")
+        return ConversationHandler.END
+
     if ',' in full_text:
         words = [w.strip() for w in full_text.split(',') if w.strip()]
     else:
@@ -1391,12 +1416,16 @@ async def addbannedword_receive(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("❌ Koi word nahi mila.")
         return ConversationHandler.END
     
-    added = 0
-    for w in words:
-        add_banned_word(group_id, w, update.effective_user.id)
-        added += 1
+    total_added = 0
+    for group_id in group_ids:
+        added = 0
+        for w in words:
+            add_banned_word(group_id, w, update.effective_user.id)
+            added += 1
+        total_added += added
+        logger.info(f"Added {added} banned word(s) to group {group_id}")
     
-    await update.message.reply_text(f"✅ {added} banned word(s) add ho gaye.")
+    await update.message.reply_text(f"✅ {total_added} banned word(s) {len(group_ids)} group(s) mein add ho gaye.")
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -1407,17 +1436,52 @@ async def addbannedword_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ================== CONVERSATION: /removebannedword ==================
 async def removebannedword_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == 'private':
-        return await ask_for_group_id(update, context, BANNED_WORD_INPUT)
+    if update.effective_chat.type == 'private' and context.args:
+        group_ids = []
+        for arg in context.args:
+            try:
+                gid = int(arg)
+                group_ids.append(gid)
+            except ValueError:
+                await update.message.reply_text(f"❌ Galat group ID: {arg}")
+                return ConversationHandler.END
+        user_id = update.effective_user.id
+        invalid = []
+        for gid in group_ids:
+            if not await is_user_admin_in_group(user_id, gid, context):
+                invalid.append(gid)
+        if invalid:
+            await update.message.reply_text(f"❌ Aap following groups ke admin nahi hain: {', '.join(str(g) for g in invalid)}")
+            return ConversationHandler.END
+        context.user_data['target_group_ids'] = group_ids
+        await update.message.reply_text(
+            "🗑️ *Banned Word Remove Karein*\n\n"
+            "Ek ya multiple words likho jo remove karne hain.",
+            parse_mode='Markdown'
+        )
+        return BANNED_WORD_INPUT
     else:
-        context.user_data['target_group_id'] = update.effective_chat.id
-        return await removebannedword_after_group(update, context)
+        if update.effective_chat.type == 'private':
+            return await ask_for_group_id(update, context, BANNED_WORD_INPUT)
+        else:
+            context.user_data['target_group_id'] = update.effective_chat.id
+            return await removebannedword_after_group(update, context)
 
 async def removebannedword_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = context.user_data.get('target_group_id')
     if not group_id:
-        await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
-        return ConversationHandler.END
+        group_ids = context.user_data.get('target_group_ids')
+        if group_ids:
+            context.user_data['target_group_ids'] = group_ids
+            await update.message.reply_text(
+                "🗑️ *Banned Word Remove Karein*\n\n"
+                "Ek ya multiple words likho jo remove karne hain.",
+                parse_mode='Markdown'
+            )
+            return BANNED_WORD_INPUT
+        else:
+            await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
+            return ConversationHandler.END
 
     if update.effective_chat.type != 'private':
         if not await is_user_admin_in_group(update.effective_user.id, group_id, context):
@@ -1433,7 +1497,14 @@ async def removebannedword_after_group(update: Update, context: ContextTypes.DEF
 
 async def removebannedword_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_text = update.message.text.strip()
-    group_id = context.user_data.get('target_group_id')
+    group_ids = context.user_data.get('target_group_ids', [])
+    single_group = context.user_data.get('target_group_id')
+    if single_group:
+        group_ids = [single_group]
+    if not group_ids:
+        await update.message.reply_text("❌ Koi group ID nahi mila. Phir se try karein.")
+        return ConversationHandler.END
+
     if ',' in full_text:
         words = [w.strip() for w in full_text.split(',') if w.strip()]
     else:
@@ -1443,17 +1514,19 @@ async def removebannedword_receive(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("❌ Koi word nahi mila.")
         return ConversationHandler.END
     
-    removed = 0
-    not_found = 0
-    for w in words:
-        if remove_banned_word(group_id, w):
-            removed += 1
-        else:
-            not_found += 1
+    total_removed = 0
+    total_not_found = 0
+    for group_id in group_ids:
+        for w in words:
+            if remove_banned_word(group_id, w):
+                total_removed += 1
+            else:
+                total_not_found += 1
+        logger.info(f"Processed banned words for group {group_id}")
     
-    msg = f"✅ {removed} word(s) remove ho gaye."
-    if not_found:
-        msg += f"\n⚠️ {not_found} word(s) list mein nahi the."
+    msg = f"✅ {total_removed} word(s) remove ho gaye."
+    if total_not_found:
+        msg += f"\n⚠️ {total_not_found} word(s) list mein nahi the."
     await update.message.reply_text(msg)
     context.user_data.clear()
     return ConversationHandler.END
@@ -1472,7 +1545,7 @@ async def kick_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await kick_after_group(update, context)
 
 async def kick_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if not group_id:
         await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
         return ConversationHandler.END
@@ -1505,9 +1578,8 @@ async def kick_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = "No reason"
     
     identifier = context.user_data['kick_target']
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     try:
-        # Resolve user
         if identifier.startswith('@'):
             user = await context.bot.get_chat(identifier)
             user_id = user.id
@@ -1521,7 +1593,7 @@ async def kick_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 mention = f"<code>{user_id}</code>"
         
         await context.bot.ban_chat_member(chat_id=group_id, user_id=user_id)
-        await context.bot.unban_chat_member(chat_id=group_id, user_id=user_id)  # kick
+        await context.bot.unban_chat_member(chat_id=group_id, user_id=user_id)
         await context.bot.send_message(
             OWNER_ID,
             f"👢 *Kick Action*\nGroup: `{group_id}`\nUser: {mention}\nReason: {reason}\nBy: {update.effective_user.mention_html()}",
@@ -1548,7 +1620,7 @@ async def ban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await ban_after_group(update, context)
 
 async def ban_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if not group_id:
         await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
         return ConversationHandler.END
@@ -1581,7 +1653,7 @@ async def ban_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = "No reason"
     
     identifier = context.user_data['ban_target']
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     try:
         if identifier.startswith('@'):
             user = await context.bot.get_chat(identifier)
@@ -1622,7 +1694,7 @@ async def unban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await unban_after_group(update, context)
 
 async def unban_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if not group_id:
         await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
         return ConversationHandler.END
@@ -1641,7 +1713,7 @@ async def unban_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def unban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     identifier = update.message.text.strip()
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     try:
         if identifier.startswith('@'):
             user = await context.bot.get_chat(identifier)
@@ -1671,14 +1743,12 @@ async def ghost_enable_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.effective_chat.type == 'private':
         return await ask_for_group_id(update, context, GHOST_DEST_TYPE)
     else:
-        # In group, directly enable for current group
         group_id = update.effective_chat.id
         context.user_data['target_group_id'] = group_id
         await ghost_enable_ask_dest(update, context)
         return GHOST_DEST_TYPE
 
 async def ghost_enable_ask_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ask where to forward messages."""
     await update.message.reply_text(
         "👻 *Ghost Mode - Destination*\n\n"
         "Kahan forward karna hai?\n"
@@ -1689,12 +1759,10 @@ async def ghost_enable_ask_dest(update: Update, context: ContextTypes.DEFAULT_TY
     return GHOST_DEST_TYPE
 
 async def ghost_enable_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle destination input."""
     text = update.message.text.strip().lower()
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     
     if text == 'bot':
-        # Forward to owner
         forward_to = OWNER_ID
         set_ghost_mode(group_id, True)
         add_ghost_forward(group_id, forward_to)
@@ -1702,17 +1770,16 @@ async def ghost_enable_dest(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         return ConversationHandler.END
     else:
-        # Try to parse as chat ID
         try:
             forward_to = int(text)
-            # Optional: verify that the bot can access this chat
+            if forward_to == group_id:
+                await update.message.reply_text("❌ Destination group same nahi ho sakta.")
+                return GHOST_DEST_TYPE
             try:
                 chat = await context.bot.get_chat(forward_to)
-                chat_title = chat.title or chat.first_name or str(forward_to)
-                await update.message.reply_text(f"✅ Destination chat mil gaya: `{chat_title}`")
+                await update.message.reply_text(f"✅ Destination chat mil gaya: `{chat.title or chat.first_name or forward_to}`")
             except:
                 await update.message.reply_text("⚠️ Warning: Bot us chat mein nahi ho sakta ya chat exist nahi karti. Phir bhi forward attempt karega.")
-            
             set_ghost_mode(group_id, True)
             add_ghost_forward(group_id, forward_to)
             await update.message.reply_text(f"👻 Ghost mode enabled for group `{group_id}`. Saare messages `{forward_to}` par forward honge.", parse_mode='Markdown')
@@ -1743,7 +1810,7 @@ async def ghost_disable_start(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
 async def ghost_disable_after_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    group_id = context.user_data.get('target_group_id')
+    group_id = context.user_data.get('target_group_id') or context.user_data.get('target_group_ids', [None])[0]
     if not group_id:
         await update.message.reply_text("❌ Kuch gadbad hui. Phir se try karein.")
         return ConversationHandler.END
@@ -1799,7 +1866,6 @@ async def sudo_command_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return SUDO_ARGS
     else:
-        # Execute immediately
         return await sudo_execute(update, context)
 
 async def sudo_args(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1921,7 +1987,7 @@ async def blacklist_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data['blacklist_action'] == 'add':
         await update.message.reply_text("📝 *Reason (optional)*\n\nReason likho ya 'skip':", parse_mode='Markdown')
         return BLACKLIST_REASON
-    else:  # remove
+    else:
         if remove_from_blacklist(target_id):
             await update.message.reply_text(f"✅ `{target_id}` blacklist se hata diya.", parse_mode='Markdown')
         else:
@@ -2087,6 +2153,35 @@ async def premium_list_command(update: Update, context: ContextTypes.DEFAULT_TYP
         msg += f"• `{user['user_id']}` – {expiry_text}\n"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+# ================== WHITELIST COMMANDS ==================
+async def whitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /whitelist <chat_id>")
+        return
+    try:
+        chat_id = int(context.args[0])
+        add_whitelist(chat_id)
+        await update.message.reply_text(f"✅ Chat {chat_id} whitelist mein add ho gaya.")
+    except ValueError:
+        await update.message.reply_text("❌ Galat chat ID.")
+
+async def unwhitelist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("❌ Sirf owner ke liye")
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /unwhitelist <chat_id>")
+        return
+    try:
+        chat_id = int(context.args[0])
+        remove_whitelist(chat_id)
+        await update.message.reply_text(f"✅ Chat {chat_id} whitelist se hata diya.")
+    except ValueError:
+        await update.message.reply_text("❌ Galat chat ID.")
+
 # ================== LIST BANNED WORDS ==================
 async def listbannedwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == 'private':
@@ -2226,8 +2321,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *🛡️ Group Admin Commands (Group mein ya private mein group ID dekar):*
 /setwelcome - Welcome message set karein (text/media)
 /setgoodbye - Goodbye message set karein (text/media)
-/addbannedword - Banned word add karein (multiple)
-/removebannedword - Banned word hatao
+/addbannedword [group_ids] - Banned word add karein (multiple groups supported)
+/removebannedword [group_ids] - Banned word hatao (multiple groups supported)
 /listbannedwords - Banned words dekhein
 /addrule - Auto-reply rule banayein (media reply ke saath)
 /rules - Group ke saare rules dekhein
@@ -2248,31 +2343,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /addpremium - User ko premium do (conversation)
 /removepremium - User ka premium hatao (conversation)
 /premiumlist - Saare premium users dekho
+/whitelist <chat_id> - Chat ko whitelist karo (rules/banned words skip)
+/unwhitelist <chat_id> - Chat se whitelist hatao
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 # ================== MESSAGE HANDLER ==================
 async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Track all chats and users, also handle ghost mode forwarding and rule checking."""
     chat = update.effective_chat
     user = update.effective_user
 
     if chat:
         save_chat(chat.id, chat.type)
-        # Ghost mode forwarding with custom destination
-        if chat.type in ['group', 'supergroup'] and is_ghost_mode(chat.id):
-            if update.message and update.effective_user.id != OWNER_ID:
-                # Get the destination from database
+        # Ghost mode forwarding
+        if chat.type in ['group', 'supergroup']:
+            ghost_enabled = is_ghost_mode(chat.id)
+            if ghost_enabled:
                 forward_to = get_ghost_destination(chat.id)
-                if forward_to:
+                if forward_to and forward_to != chat.id and update.message and update.effective_user.id != OWNER_ID:
                     try:
                         await context.bot.forward_message(chat_id=forward_to, from_chat_id=chat.id, message_id=update.message.message_id)
+                        logger.info(f"Ghost forwarded message {update.message.message_id} from {chat.id} to {forward_to}")
                     except Exception as e:
-                        logger.error(f"Failed to forward ghost message to {forward_to}: {e}")
-        # Check rules and banned words for messages
-        if update.message:
+                        logger.error(f"Ghost forward failed: {e}")
+        # Check rules and banned words, but skip if whitelisted
+        if update.message and not is_whitelisted(chat.id):
             await check_rules(update, context)
             await check_banned_words(update, context)
+        elif update.message and is_whitelisted(chat.id):
+            logger.info(f"Skipping rules and banned words for whitelisted chat {chat.id}")
 
     if user:
         save_user(user.id)
@@ -2286,18 +2385,33 @@ async def track_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     # New member joined
-    if update.new_chat_member.status == ChatMember.MEMBER and update.old_chat_member.status == ChatMember.LEFT:
-        user = update.new_chat_member.user
-        await send_welcome_or_goodbye(chat.id, user, context, is_welcome=True)
+    if update.new_chat_member and update.old_chat_member:
+        if update.new_chat_member.status == ChatMember.MEMBER and update.old_chat_member.status == ChatMember.LEFT:
+            user = update.new_chat_member.user
+            logger.info(f"New member {user.id} joined {chat.id}")
+            await send_welcome_or_goodbye(chat.id, user, context, is_welcome=True)
     
     # Member left
-    elif update.old_chat_member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR] and update.new_chat_member.status == ChatMember.LEFT:
-        user = update.old_chat_member.user
-        await send_welcome_or_goodbye(chat.id, user, context, is_welcome=False)
+    if update.old_chat_member and update.new_chat_member:
+        if update.old_chat_member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.CREATOR] and update.new_chat_member.status == ChatMember.LEFT:
+            user = update.old_chat_member.user
+            logger.info(f"Member {user.id} left {chat.id}")
+            await send_welcome_or_goodbye(chat.id, user, context, is_welcome=False)
 
 # ================== LOAD JOBS ON START ==================
 def load_jobs_from_db_into_scheduler():
     """Load all active jobs and pending deletions from database into scheduler."""
+    # First, delete any expired jobs from DB
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    now = datetime.now().isoformat()
+    c.execute("DELETE FROM repeat_jobs WHERE expiry <= ?", (now,))
+    deleted = c.rowcount
+    if deleted:
+        logger.info(f"Deleted {deleted} expired jobs from database")
+    conn.commit()
+    conn.close()
+
     jobs = get_all_active_jobs()
     for job in jobs:
         scheduler.add_job(
@@ -2312,8 +2426,7 @@ def load_jobs_from_db_into_scheduler():
     # Load pending deletions
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    now = datetime.now()
-    c.execute('SELECT job_id, chat_id, message_id, delete_at FROM sent_messages WHERE delete_at > ?', (now.isoformat(),))
+    c.execute('SELECT job_id, chat_id, message_id, delete_at FROM sent_messages WHERE delete_at > ?', (now,))
     rows = c.fetchall()
     conn.close()
     for job_id, chat_id, msg_id, delete_at_str in rows:
@@ -2345,20 +2458,15 @@ async def run_http_server():
 def main():
     global bot_app
 
-    # Initialize database
     init_db()
 
-    # Create event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # Start HTTP server for Render
     loop.create_task(run_http_server())
 
-    # Create bot application
     bot_app = Application.builder().token(TOKEN).build()
 
-    # Delete any existing webhook to allow polling
     async def delete_webhook():
         try:
             await bot_app.bot.delete_webhook()
@@ -2366,12 +2474,9 @@ def main():
         except Exception as e:
             logger.error(f"Failed to delete webhook: {e}")
 
-    # Run webhook deletion before starting polling
     loop.run_until_complete(delete_webhook())
 
     # ========== CONVERSATION HANDLERS ==========
-
-    # /setrepeat
     setrepeat_conv = ConversationHandler(
         entry_points=[CommandHandler('setrepeat', setrepeat_start)],
         states={
@@ -2385,7 +2490,6 @@ def main():
     )
     bot_app.add_handler(setrepeat_conv)
 
-    # /addrule
     addrule_conv = ConversationHandler(
         entry_points=[CommandHandler('addrule', addrule_start)],
         states={
@@ -2399,7 +2503,6 @@ def main():
     )
     bot_app.add_handler(addrule_conv)
 
-    # /setwelcome
     welcome_conv = ConversationHandler(
         entry_points=[CommandHandler('setwelcome', setwelcome_start)],
         states={
@@ -2411,7 +2514,6 @@ def main():
     )
     bot_app.add_handler(welcome_conv)
 
-    # /setgoodbye
     goodbye_conv = ConversationHandler(
         entry_points=[CommandHandler('setgoodbye', setgoodbye_start)],
         states={
@@ -2423,7 +2525,6 @@ def main():
     )
     bot_app.add_handler(goodbye_conv)
 
-    # /addbannedword
     addbanned_conv = ConversationHandler(
         entry_points=[CommandHandler('addbannedword', addbannedword_start)],
         states={
@@ -2434,7 +2535,6 @@ def main():
     )
     bot_app.add_handler(addbanned_conv)
 
-    # /removebannedword
     removebanned_conv = ConversationHandler(
         entry_points=[CommandHandler('removebannedword', removebannedword_start)],
         states={
@@ -2445,7 +2545,6 @@ def main():
     )
     bot_app.add_handler(removebanned_conv)
 
-    # /kick
     kick_conv = ConversationHandler(
         entry_points=[CommandHandler('kick', kick_start)],
         states={
@@ -2457,7 +2556,6 @@ def main():
     )
     bot_app.add_handler(kick_conv)
 
-    # /ban
     ban_conv = ConversationHandler(
         entry_points=[CommandHandler('ban', ban_start)],
         states={
@@ -2469,7 +2567,6 @@ def main():
     )
     bot_app.add_handler(ban_conv)
 
-    # /unban
     unban_conv = ConversationHandler(
         entry_points=[CommandHandler('unban', unban_start)],
         states={
@@ -2480,7 +2577,6 @@ def main():
     )
     bot_app.add_handler(unban_conv)
 
-    # /ghostenable
     ghost_enable_conv = ConversationHandler(
         entry_points=[CommandHandler('ghostenable', ghost_enable_start)],
         states={
@@ -2491,7 +2587,6 @@ def main():
     )
     bot_app.add_handler(ghost_enable_conv)
 
-    # /ghostdisable
     ghost_disable_conv = ConversationHandler(
         entry_points=[CommandHandler('ghostdisable', ghost_disable_start)],
         states={
@@ -2502,7 +2597,6 @@ def main():
     )
     bot_app.add_handler(ghost_disable_conv)
 
-    # /sudo
     sudo_conv = ConversationHandler(
         entry_points=[CommandHandler('sudo', sudo_start)],
         states={
@@ -2514,7 +2608,6 @@ def main():
     )
     bot_app.add_handler(sudo_conv)
 
-    # /blacklist
     blacklist_conv = ConversationHandler(
         entry_points=[CommandHandler('blacklist', blacklist_start)],
         states={
@@ -2526,7 +2619,6 @@ def main():
     )
     bot_app.add_handler(blacklist_conv)
 
-    # /addpremium
     premium_conv = ConversationHandler(
         entry_points=[CommandHandler('addpremium', addpremium_start)],
         states={
@@ -2537,7 +2629,6 @@ def main():
     )
     bot_app.add_handler(premium_conv)
 
-    # /removepremium
     remove_premium_conv = ConversationHandler(
         entry_points=[CommandHandler('removepremium', removepremium_start)],
         states={
@@ -2561,6 +2652,8 @@ def main():
     bot_app.add_handler(CommandHandler('backup', backup_command))
     bot_app.add_handler(CommandHandler('restore', restore_command))
     bot_app.add_handler(CommandHandler('premiumlist', premium_list_command))
+    bot_app.add_handler(CommandHandler('whitelist', whitelist_command))
+    bot_app.add_handler(CommandHandler('unwhitelist', unwhitelist_command))
 
     # ========== CHAT MEMBER HANDLER ==========
     bot_app.add_handler(ChatMemberHandler(track_chat_members, ChatMemberHandler.CHAT_MEMBER))
