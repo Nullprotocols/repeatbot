@@ -1,9 +1,8 @@
 # database.py
 # Complete database operations for Telegram Repeat Bot – Ultimate Edition
 # Includes all features: repeat jobs, premium, blacklist, ghost mode, welcome/goodbye (with media),
-# auto-reply rules (with media reply), warns, banned words, backup/restore.
-# Python 3.12.3 compatible
-# Render Web Service ready – no external dependencies
+# auto-reply rules (with media reply), warns, banned words, backup/restore, whitelist.
+# Compatible with Python 3.12.3
 
 import sqlite3
 import json
@@ -130,7 +129,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS ghost_forward (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             group_id INTEGER NOT NULL,
-            forward_to INTEGER NOT NULL,  -- owner's ID
+            forward_to INTEGER NOT NULL,
             created_at TIMESTAMP
         )
     ''')
@@ -140,8 +139,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS group_rules (
             rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
             group_id INTEGER NOT NULL,
-            trigger_type TEXT NOT NULL,  -- 'text', 'photo', 'video', 'document', 'poll', 'voice', 'sticker', 'emoji', 'all'
-            trigger_pattern TEXT,  -- keyword ya pattern (NULL for type-based only)
+            trigger_type TEXT NOT NULL,
+            trigger_pattern TEXT,
             is_regex BOOLEAN DEFAULT 0,
             reply_template TEXT,
             auto_delete_trigger BOOLEAN DEFAULT 0,
@@ -191,6 +190,13 @@ def init_db():
         )
     ''')
 
+    # Whitelist table (for exempting chats from rules/banned words)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS whitelist (
+            chat_id INTEGER PRIMARY KEY
+        )
+    ''')
+
     # Initialize stats if not present
     c.execute('INSERT OR IGNORE INTO stats (stat_name, stat_value) VALUES (?, ?)',
               ('total_messages_sent', 0))
@@ -201,6 +207,28 @@ def init_db():
     conn.close()
     logger.info("Database initialized successfully with all tables")
 
+# ================== WHITELIST FUNCTIONS ==================
+def add_whitelist(chat_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO whitelist (chat_id) VALUES (?)', (chat_id,))
+    conn.commit()
+    conn.close()
+
+def remove_whitelist(chat_id: int):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('DELETE FROM whitelist WHERE chat_id = ?', (chat_id,))
+    conn.commit()
+    conn.close()
+
+def is_whitelisted(chat_id: int) -> bool:
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT 1 FROM whitelist WHERE chat_id = ?', (chat_id,))
+    row = c.fetchone()
+    conn.close()
+    return row is not None
 
 # ================== BACKUP & RESTORE ==================
 def create_backup() -> str:
@@ -232,11 +260,10 @@ def restore_from_backup(backup_path: str) -> bool:
 def cleanup_old_backups(keep: int = 7):
     """Delete old backups, keeping only the latest `keep` ones."""
     backups = [f for f in os.listdir('.') if f.startswith('backup_') and f.endswith('.db')]
-    backups.sort(reverse=True)  # newest first
+    backups.sort(reverse=True)
     for old_backup in backups[keep:]:
         os.remove(old_backup)
         logger.info(f"Removed old backup: {old_backup}")
-
 
 # ================== USER FUNCTIONS ==================
 def save_user(user_id: int):
@@ -320,7 +347,6 @@ def get_all_premium_users() -> List[Dict]:
         result.append(user)
     return result
 
-
 # ================== CHAT FUNCTIONS ==================
 def save_chat(chat_id: int, chat_type: str):
     """Insert or update a known chat."""
@@ -344,7 +370,6 @@ def get_all_known_chats(chat_type: str = None) -> List[int]:
     rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
-
 
 # ================== BLACKLIST FUNCTIONS ==================
 def add_to_blacklist(target_id: int, target_type: str, reason: str = "", created_by: int = 0) -> bool:
@@ -402,7 +427,6 @@ def get_all_blacklisted() -> List[Dict]:
             'created_at': datetime.fromisoformat(row[3]) if row[3] else None
         })
     return result
-
 
 # ================== JOB FUNCTIONS ==================
 def save_job_to_db(job_id: str, creator_id: int, source_chat_id: int, target_ids: List[int],
@@ -515,7 +539,6 @@ def get_jobs_for_creator(creator_id: int) -> List[Dict]:
         jobs.append(job)
     return jobs
 
-
 # ================== SENT MESSAGES FUNCTIONS ==================
 def save_sent_message(job_id: str, chat_id: int, message_id: int, delete_at: Optional[datetime] = None, rule_id: int = None):
     """Record a sent message for potential auto-deletion."""
@@ -546,7 +569,6 @@ def get_expired_messages() -> List[tuple]:
     conn.close()
     return rows
 
-
 # ================== STATS FUNCTIONS ==================
 def increment_stat(stat_name: str, by: int = 1):
     """Increment a statistic counter."""
@@ -567,8 +589,7 @@ def get_stat(stat_name: str) -> int:
     conn.close()
     return row[0] if row else 0
 
-
-# ================== GROUP SETTINGS (WELCOME/GOODBYE/GHOST) ==================
+# ================== GROUP SETTINGS ==================
 def set_group_welcome(group_id: int, message: str, enabled: bool = True):
     """Set or disable welcome message (text only) for a group."""
     conn = sqlite3.connect(DB_FILE)
@@ -698,7 +719,6 @@ def get_all_ghost_groups() -> List[Dict]:
     conn.close()
     return [{'group_id': row[0], 'forward_to': row[1]} for row in rows]
 
-# ================== GHOST DESTINATION LOOKUP ==================
 def get_ghost_destination(group_id: int) -> Optional[int]:
     """Return the forward_to ID for a ghost-enabled group."""
     conn = sqlite3.connect(DB_FILE)
@@ -708,7 +728,7 @@ def get_ghost_destination(group_id: int) -> Optional[int]:
     conn.close()
     return row[0] if row else None
 
-# ================== RULE FUNCTIONS (AUTO-REPLY) ==================
+# ================== RULE FUNCTIONS ==================
 def add_rule(group_id: int, trigger_type: str, trigger_pattern: str, is_regex: bool,
              reply_template: str, auto_delete_trigger: bool, auto_delete_reply: bool,
              auto_delete_seconds: int, warn_on_trigger: bool, warn_count: int,
@@ -796,7 +816,6 @@ def get_rule(rule_id: int) -> Optional[Dict]:
     rule['created_at'] = datetime.fromisoformat(rule['created_at']) if rule['created_at'] else None
     return rule
 
-
 # ================== WARN FUNCTIONS ==================
 def add_warn(user_id: int, group_id: int, rule_id: int, warned_by: int, reason: str = ""):
     """Add a warning record for a user."""
@@ -828,7 +847,6 @@ def clear_user_warns(user_id: int, group_id: int):
     conn.commit()
     conn.close()
     logger.info(f"All warns cleared for user {user_id} in group {group_id}")
-
 
 # ================== BANNED WORDS FUNCTIONS ==================
 def add_banned_word(group_id: int, word: str, created_by: int):
